@@ -1,15 +1,17 @@
 """Exercise same-sample comparisons and release exit statuses."""
 
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from ai_practice.gates import evaluate_pairs, gate_agent
+from ai_practice.gates import evaluate_pairs, gate_agent, gate_vision
 from ai_practice.report import render
 from rsi_agent.study import study
 from vlm_posttraining.fixtures import generate
+from vlm_posttraining.pipeline import read_jsonl, write_jsonl
 
 
 class RegressionGateTests(unittest.TestCase):
@@ -50,6 +52,41 @@ class RegressionGateTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["checks"]["accuracy"]["delta"], 0)
         self.assertEqual(len(changes), 2)
+
+
+    def test_task_slices_flag_regression_cancelled_by_another_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            generate(data)
+            manifest = data / "prepared/test.jsonl"
+            samples = list(read_jsonl(manifest))
+
+            def predictions(wrong_task):
+                return [
+                    {"id": row["id"], "completion": json.dumps({
+                        "answer": "wrong" if row["task"] == wrong_task else row["answer"],
+                        "evidence": row["evidence"],
+                    })}
+                    for row in reversed(samples)
+                ]
+
+            baseline, candidate = root / "base.jsonl", root / "candidate.jsonl"
+            write_jsonl(baseline, predictions("ocr"))
+            write_jsonl(candidate, predictions("docvqa"))
+            output = root / "gate"
+            result = gate_vision(manifest, baseline, candidate, output, slice_by=["task"], min_slice_samples=2)
+            self.assertTrue(result["overall_passed"])
+            self.assertFalse(result["passed"])
+            groups = {row["value"]: row for row in result["by_slice"]["task"]["slices"]}
+            self.assertEqual(groups["docvqa"]["checks"]["answer_accuracy"]["regressed"], 6)
+            self.assertEqual(groups["ocr"]["status"], "passed")
+            changes = list(read_jsonl(output / "changes.jsonl"))
+            self.assertEqual({row["slices"]["task"] for row in changes}, {"docvqa", "ocr"})
+            self.assertIn("分组验收", render(output))
+            unavailable = gate_vision(manifest, baseline, candidate, root / "no_labels", slice_by=["dataset"])
+            self.assertFalse(unavailable["passed"])
+            self.assertEqual(unavailable["by_slice"]["dataset"]["missing_labels"], 18)
 
 
 if __name__ == "__main__":

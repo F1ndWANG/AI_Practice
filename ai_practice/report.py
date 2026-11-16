@@ -100,16 +100,31 @@ def reward_lines(summary):
 
 
 def gate_lines(summary):
-    rows = []
-    for metric, check in summary["checks"].items():
+    states = {"passed": "通过", "failed": "失败", "insufficient": "样本不足",
+              "unavailable": "缺少标签"}
+
+    def metric_cells(metric, check):
         show = (lambda value: "—" if value is None else f"{value:.2f}") if metric == "tool_calls" else percent
-        rows.append((metric, check["samples"], show(check["baseline"]), show(check["candidate"]),
-                     show(check["delta"]), check["regressed"], "通过" if check["passed"] else "失败"))
-    return [
+        status = check.get("status", "passed" if check["passed"] else "failed")
+        return (metric, check["samples"], show(check["baseline"]), show(check["candidate"]),
+                show(check["delta"]), check["regressed"], states[status])
+
+    columns = ("指标", "样本", "基线", "候选", "差值", "退化样本", "判定")
+    lines = [
         f"## {summary['domain']} 回归验收", "",
         f"结果  {'通过' if summary['passed'] else '失败'}", "",
-        *table(("指标", "样本", "基线", "候选", "差值", "退化样本", "判定"), rows), "",
+        *table(columns, [metric_cells(metric, check) for metric, check in summary["checks"].items()]), "",
     ]
+    for dimension, report in summary.get("by_slice", {}).items():
+        rows = [(group["value"] if group["value"] is not None else "未标注", *metric_cells(metric, check))
+                for group in report["slices"] for metric, check in group["checks"].items()]
+        lines.extend([
+            f"### 分组验收 · {dimension}", "",
+            f"{'通过' if report['passed'] else '失败'}，"
+            f"有效检查 {report['assessed_checks']} 项，缺少分组标签 {report['missing_labels']} 条", "",
+            *table(("分组", *columns), rows), "",
+        ])
+    return lines
 
 
 def vision_lines(summary, name):

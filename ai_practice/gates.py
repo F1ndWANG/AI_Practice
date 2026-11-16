@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 
 from vlm_posttraining.pipeline import read_jsonl, score_predictions, write_jsonl
@@ -65,6 +66,63 @@ def evaluate_pairs(base, candidate, metrics, *, max_regressions=None):
             "samples": len(left), "checks": checks}, changes.values()
 
 
+def evaluate_slices(base, candidate, metrics, dimensions, minimum, max_regressions):
+    if minimum < 1 or len(set(dimensions)) != len(dimensions):
+        raise ValueError("Slice minimum must be positive and dimensions distinct")
+    by_id = indexed(candidate)
+    dimensions_report = {}
+    for dimension in dimensions:
+        buckets = defaultdict(list)
+        for row in base:
+            value = row.get(dimension)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"Invalid slice value for {dimension}/{row['id']}")
+            buckets[value].append(row)
+        slices = []
+        for value, left in sorted(buckets.items(), key=lambda item: (item[0] is None, item[0] or "")):
+            right = [by_id[row["id"]] for row in left]
+            outcome, _ = evaluate_pairs(left, right, metrics, max_regressions=max_regressions)
+            for check in outcome["checks"].values():
+                if value is None or check["samples"] < minimum:
+                    check["status"] = "unavailable" if value is None else "insufficient"
+                    check["passed"] = None
+                else:
+                    check["status"] = "passed" if check["passed"] else "failed"
+            statuses = [check["status"] for check in outcome["checks"].values()]
+            if "failed" in statuses:
+                decision = "failed"
+            elif "passed" in statuses:
+                decision = "passed"
+            else:
+                decision = "unavailable" if value is None else "insufficient"
+            slices.append({"value": value, "rows": len(left), "status": decision,
+                           "checks": outcome["checks"]})
+        checks = [check for item in slices for check in item["checks"].values()]
+        assessed = sum(check["passed"] is not None for check in checks)
+        dimensions_report[dimension] = {
+            "passed": bool(assessed) and not any(check["passed"] is False for check in checks),
+            "assessed_checks": assessed,
+            "missing_labels": len(buckets.get(None, [])),
+            "slices": slices,
+        }
+    return dimensions_report
+
+
+def evaluate_gate(base, candidate, metrics, max_regressions, slice_by, min_slice_samples):
+    report, details = evaluate_pairs(base, candidate, metrics, max_regressions=max_regressions)
+    if not slice_by:
+        return report, details
+    slices = evaluate_slices(base, candidate, metrics, slice_by, min_slice_samples, max_regressions)
+    by_id = indexed(base)
+    changes = [
+        {**row, "slices": {key: by_id[row["id"]].get(key) for key in slice_by}}
+        for row in details
+    ]
+    return {**report, "overall_passed": report["passed"], "min_slice_samples": min_slice_samples,
+            "passed": report["passed"] and all(item["passed"] for item in slices.values()),
+            "by_slice": slices}, changes
+
+
 def save(output, report, details):
     output.mkdir(parents=True, exist_ok=False)
     write_jsonl(output / "changes.jsonl", details)
@@ -87,7 +145,8 @@ def agent_inputs(run, variant):
 
 
 def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidate="brs_drs",
-               max_success_drop=0.0, max_call_increase=0.0, max_regressions=None):
+               max_success_drop=0.0, max_call_increase=0.0, max_regressions=None,
+               slice_by=(), min_slice_samples=1):
     old, left_digest, left = agent_inputs(base_run, baseline)
     new, right_digest, right = agent_inputs(candidate_run, candidate)
     if left_digest != right_digest or old["test_budget_per_task"] != new["test_budget_per_task"]:
@@ -103,10 +162,10 @@ def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidat
             or type(row["tool_calls"]) is not int or not 0 <= row["tool_calls"] <= budget for row in rows
         )):
             raise ValueError("Agent traces do not match the held-out task snapshot or budget")
-    report, details = evaluate_pairs(*traces, {
+    report, details = evaluate_gate(*traces, {
         "task_success": (lambda row: int(row["success"]), max_success_drop),
         "tool_calls": (lambda row: row["tool_calls"], max_call_increase),
-    }, max_regressions=max_regressions)
+    }, max_regressions, slice_by, min_slice_samples)
     return save(output, {"kind": "regression_gate", "domain": "Agent",
                          "task_snapshot_sha256": left_digest, "budget": budget,
                          "baseline": {"variant": baseline, "trace_sha256": sha256(left)},
@@ -115,7 +174,8 @@ def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidat
 
 
 def gate_vision(manifest, base, candidate, output, *, max_accuracy_drop=0.0,
-                max_format_drop=0.0, max_grounded_drop=None, max_regressions=None):
+                max_format_drop=0.0, max_grounded_drop=None, max_regressions=None,
+                slice_by=(), min_slice_samples=1):
     metrics = {
         "answer_accuracy": (lambda row: row["accuracy"], max_accuracy_drop),
         "format_acceptance": (lambda row: row["format"], max_format_drop),
@@ -125,8 +185,8 @@ def gate_vision(manifest, base, candidate, output, *, max_accuracy_drop=0.0,
             lambda row: int(grounded_correct(row)) if row["evidence"] is not None else None,
             max_grounded_drop,
         )
-    report, details = evaluate_pairs(score_predictions(manifest, base), score_predictions(manifest, candidate),
-                                     metrics, max_regressions=max_regressions)
+    report, details = evaluate_gate(score_predictions(manifest, base), score_predictions(manifest, candidate),
+                                    metrics, max_regressions, slice_by, min_slice_samples)
     return save(output, {"kind": "regression_gate", "domain": "VLM",
                          "manifest_sha256": sha256(manifest), "baseline_sha256": sha256(base),
                          "candidate_sha256": sha256(candidate), **report}, details)
@@ -151,11 +211,16 @@ def main():
     vision.add_argument("--max-accuracy-drop", type=float, default=0.0)
     vision.add_argument("--max-format-drop", type=float, default=0.0)
     vision.add_argument("--max-grounded-drop", type=float)
+    agent.add_argument("--slice-by", choices=["task"], action="append", default=[])
+    vision.add_argument("--slice-by", choices=["task", "difficulty", "dataset"], action="append", default=[])
     for command in (agent, vision):
         command.add_argument("--max-regressions", type=int)
+        command.add_argument("--min-slice-samples", type=int, default=1)
     args = parser.parse_args()
     if args.max_regressions is not None and args.max_regressions < 0:
         parser.error("--max-regressions must be nonnegative")
+    if args.min_slice_samples < 1 or len(set(args.slice_by)) != len(args.slice_by):
+        parser.error("Slice minimum must be positive and dimensions distinct")
     options = vars(args)
     action = gate_agent if options.pop("domain") == "agent" else gate_vision
     report = action(**options)
