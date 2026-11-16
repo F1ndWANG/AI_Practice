@@ -9,6 +9,7 @@ from statistics import mean
 
 from ai_practice.artifacts import sha256, write_json
 
+from .blind import fingerprint, prompts
 from .pipeline import normalize, read_jsonl, reward_value, score, write_jsonl
 
 
@@ -45,7 +46,7 @@ def inspect_groups(items):
     }
 
 
-def audit(manifest, output, evidence_weight=0.5, candidates=None):
+def audit(manifest, output, evidence_weight=0.5, candidates=None, sampling_receipt=None):
     if not math.isfinite(evidence_weight) or evidence_weight < 0:
         raise ValueError("Evidence weight must be finite and nonnegative")
     refs = {}
@@ -55,6 +56,14 @@ def audit(manifest, output, evidence_weight=0.5, candidates=None):
         refs[row["id"]] = row
     if not refs:
         raise ValueError("Reference manifest is empty")
+    sampling = None
+    if sampling_receipt is not None:
+        if candidates is None:
+            raise ValueError("Sampling verification requires a candidate file")
+        sampling = json.loads(sampling_receipt.read_text(encoding="utf-8"))
+        if (sampling.get("schema") != 1 or sampling.get("candidates_sha256") != sha256(candidates)
+                or sampling.get("dispatch_sha256") != fingerprint(list(prompts(manifest)))):
+            raise ValueError("Sampling receipt does not match the candidates or reference")
     if candidates is None:
         groups = {key: fixture_candidates(row) for key, row in refs.items()}
     else:
@@ -71,6 +80,9 @@ def audit(manifest, output, evidence_weight=0.5, candidates=None):
         if not groups:
             raise ValueError("No candidate groups supplied")
 
+    if sampling and (sampling.get("groups") != len(groups)
+                     or any(len(items) != sampling.get("count") for items in groups.values())):
+        raise ValueError("Sampling group counts do not match the receipt")
     by_slice = defaultdict(list)
     details = []
     for key, completions in groups.items():
@@ -98,6 +110,7 @@ def audit(manifest, output, evidence_weight=0.5, candidates=None):
     report = {"kind": "vlm_reward_audit", "reference_sha256": sha256(manifest),
               "candidate_sha256": sha256(candidates) if candidates else None,
               "candidate_source": "external" if candidates else "synthetic_perturbations",
+              "sampling_receipt_verified": sampling is not None,
               "reference_samples": len(refs), "evidence_weight": evidence_weight,
               "overall": inspect_groups(details),
               "by_task_evidence": {key: inspect_groups(items) for key, items in sorted(by_slice.items())}}
@@ -113,8 +126,9 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--evidence-weight", type=float, default=0.5)
     parser.add_argument("--candidates", type=Path, help='Optional JSONL with id and completions')
+    parser.add_argument("--sampling-receipt", type=Path)
     args = parser.parse_args()
-    print(json.dumps(audit(args.manifest, args.output, args.evidence_weight, args.candidates), indent=2))
+    print(json.dumps(audit(args.manifest, args.output, args.evidence_weight, args.candidates, args.sampling_receipt), indent=2))
 
 
 if __name__ == "__main__":

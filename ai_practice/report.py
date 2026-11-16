@@ -70,6 +70,17 @@ def budget_lines(summary):
     ]
 
 
+def memory_stress_lines(summary):
+    rows = [(name, result["tasks"], percent(result["success_rate"]), result["tool_calls"])
+            for name, result in summary["variants"].items()]
+    return [
+        "## RSIAgent 记忆压力测试", "",
+        f"单任务预算 {summary['budget']}，校验额外调用 {summary['calibration_tool_calls']} 次，"
+        f"拒绝 {summary['calibration_rejected']}/{summary['calibration_candidates']} 个候选配方", "",
+        *table(("设置", "任务", "成功率", "测试调用"), rows), "",
+    ]
+
+
 def reward_lines(summary):
     overview = {"全部": summary["overall"], **summary["by_task_evidence"]}
     rows = [(name, stats["groups"], stats["zero_signal_groups"], stats["zero_signal_without_evidence"],
@@ -77,7 +88,8 @@ def reward_lines(summary):
              stats["malformed_candidates"]) for name, stats in overview.items()]
     return [
         "## GRPO 奖励审计", "",
-        f"候选来源  {summary['candidate_source']}，证据权重  {summary['evidence_weight']}", "",
+        f"候选来源  {summary['candidate_source']}，证据权重  {summary['evidence_weight']}，"
+        f"覆盖 {summary['overall']['groups']}/{summary['reference_samples']} 个问题", "",
         *table(("任务", "组数", "同分组", "无证据项同分组", "正确答案排序反转", "正确答案并列",
                 "格式错误候选"), rows), "",
     ]
@@ -143,6 +155,8 @@ def render(root):
         lines.extend(matrix_lines(local_data))
     elif local_data and local_data.get("kind") == "agent_budget_sweep":
         lines.extend(budget_lines(local_data))
+    elif local_data and local_data.get("kind") == "agent_memory_stress":
+        lines.extend(memory_stress_lines(local_data))
     elif local_data and local_data.get("kind") == "vlm_reward_audit":
         lines.extend(reward_lines(local_data))
     elif local_data and "exploration_tool_calls" in local_data:

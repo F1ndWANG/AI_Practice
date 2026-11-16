@@ -61,3 +61,5 @@ ai-practice report runs/acceptance > runs/acceptance-report.md
 需要审计实验结果时，可[重放 Agent 轨迹与记忆](rsi_agent/README.md#重放轨迹与审计记忆)，或[生成多模态盲测清单](vlm_posttraining/README.md#盲测清单与评分端校验)。
 
 实验诊断入口包括 [Agent 调用预算对照](rsi_agent/README.md#调用预算对照)和 [GRPO 训练前奖励审计](vlm_posttraining/README.md#grpo-训练前奖励审计)，均可生成 Markdown 报告。
+
+[GRPO 模型候选采集](vlm_posttraining/README.md#从模型采集候选并审计)可与训练前审计直接串联。Agent 的[错误记忆压力测试](rsi_agent/README.md#错误记忆压力测试)报告成功率与重验开销。

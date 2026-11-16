@@ -178,3 +178,16 @@ python -m ai_practice report runs/grpo-audit
 ```
 
 候选可以覆盖参考清单的子集，每组至少两条输出。报告记录覆盖量，并对照证据奖励权重为零时的结果。组内所有候选同分时没有相对奖励差。若同组最低分的正确答案低于最高分的有效错误答案，则记录排序反转。通过 `--evidence-weight` 可以比较不同权重，并查看 `groups.jsonl` 中的候选级评分。合成扰动用于检验奖励逻辑，模型采样后的候选用于估计真实信号。
+
+## 从模型采集候选并审计
+
+```bash
+python -m vlm_posttraining.blind build runs/vlm/prepared/validation.jsonl \
+  runs/dispatch/validation.jsonl runs/vlm/validation-binding.json
+python -m vlm_posttraining.sample_candidates runs/dispatch/validation.jsonl runs/vlm-pilot \
+  --adapter runs/vlm/sft --count 4 --temperature 0.7 --top-p 0.9 --limit 64
+python -m vlm_posttraining.reward_audit runs/vlm/prepared/validation.jsonl runs/vlm-pilot-audit \
+  --candidates runs/vlm-pilot/candidates.jsonl --sampling-receipt runs/vlm-pilot/sampling.json
+```
+
+采集端只接收盲测清单，核对图片哈希后复用单图推理的图像预处理。每个问题按全局种子和样本 ID 派生采样种子，候选组保存生成耗时和 token 数。采集产物绑定盲测清单、采样参数、候选文件和本地 adapter 哈希。评分端可校验候选及清单是否匹配。指定 `--limit` 时采集清单前 N 条。跨设备或依赖版本的生成结果可能有差异。
