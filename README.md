@@ -100,3 +100,14 @@ python -m ai_practice.gates vision runs/acceptance/fixtures/prepared/test.jsonl 
 ```
 
 JSON 策略固定阈值、分组维度及最小有效样本数。`required_slices` 可为指定分组列出必须通过的指标。分组缺失、有效分母不足或指标退化时，必需检查失败。验收报告记录策略内容和 SHA-256。使用策略时，阈值和分组选项由策略提供，基线与候选仍由命令指定。仓库的两个示例覆盖内置 CPU 样例，可按实际实验数据调整覆盖要求。
+
+### 交付验收包
+
+```bash
+python -m ai_practice.release build runs/agent-policy runs/vision-policy runs/release
+python -m ai_practice.release verify runs/release
+```
+
+验收包汇总两份回归判定，保存 Markdown 报告、两个判定摘要和文件哈希清单。可通过 `--revision` 标记完整提交 SHA。默认省略逐样本变化记录，只有显式指定 `--include-changes` 才将其打包。原始图像、预测、权重以及完整工具轨迹留在各自实验目录。
+
+生成前会校验两份验收输出的收据。即使某项指标失败，也会生成可校验的验收包，并返回退出码 1。旧版验收目录如果缺少 `receipt.json`，需要重新运行验收命令。GitHub Actions 为两个 Python 环境分别上传内置 CPU 样例的验收包，包含样例的逐条变化记录。

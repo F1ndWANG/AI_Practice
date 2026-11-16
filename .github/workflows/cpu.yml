@@ -31,7 +31,19 @@ jobs:
       - name: Check paired regression thresholds
         shell: bash
         run: |
-          python -m ai_practice.gates agent runs/ci/agent runs/ci/agent runs/ci-agent-gate --policy examples/policies/agent.json
+          status=0
+          python -m ai_practice.gates agent runs/ci/agent runs/ci/agent runs/ci-agent-gate --policy examples/policies/agent.json || status=1
           python -m ai_practice.gates vision runs/ci/fixtures/prepared/test.jsonl \
             runs/ci/fixtures/fixture-repeated_answer.jsonl runs/ci/fixtures/fixture-oracle.jsonl \
-            runs/ci-vision-gate --policy examples/policies/vision.json
+            runs/ci-vision-gate --policy examples/policies/vision.json || status=1
+          python -m ai_practice.release build runs/ci-agent-gate runs/ci-vision-gate runs/ci-acceptance \
+            --revision "$GITHUB_SHA" --include-changes || status=1
+          python -m ai_practice.release verify runs/ci-acceptance || status=1
+          exit "$status"
+      - name: Upload acceptance bundle
+        if: always() && hashFiles('runs/ci-acceptance/receipt.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-python-${{ matrix.python-version }}
+          path: runs/ci-acceptance/
+          if-no-files-found: error

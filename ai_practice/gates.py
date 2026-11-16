@@ -10,7 +10,7 @@ from pathlib import Path
 from vlm_posttraining.pipeline import read_jsonl, score_predictions, write_jsonl
 from vlm_posttraining.compare import grounded_correct
 
-from .artifacts import sha256, write_json
+from .artifacts import artifact_index, sha256, write_json
 
 
 def indexed(rows):
@@ -148,6 +148,8 @@ def save(output, report, details):
     output.mkdir(parents=True, exist_ok=False)
     write_jsonl(output / "changes.jsonl", details)
     write_json(output / "summary.json", report)
+    write_json(output / "receipt.json", {"schema": 1,
+                                        "artifacts": artifact_index(output, ["summary.json", "changes.jsonl"])})
     return report
 
 
