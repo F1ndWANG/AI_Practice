@@ -9,6 +9,7 @@ from vlm_posttraining.compare import compare
 from vlm_posttraining.fixtures import generate
 
 from .artifacts import artifact_index, verify_index, write_json
+from .report import render
 
 
 def smoke(output, seed):
@@ -55,7 +56,12 @@ def main():
     run.add_argument("--seed", type=int, default=42)
     check = commands.add_parser("verify", help="Verify the smoke run artifact hashes")
     check.add_argument("output", type=Path)
+    report = commands.add_parser("report", help="Render an existing run as Markdown")
+    report.add_argument("output", type=Path, help="Completed experiment directory")
     args = parser.parse_args()
+    if args.command == "report":
+        print(render(args.output))
+        return
     result = smoke(args.output, args.seed) if args.command == "smoke" else verify(args.output)
     print(json.dumps(result, indent=2))
 

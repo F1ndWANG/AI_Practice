@@ -7,7 +7,7 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
-from .pipeline import metrics, normalize, score_predictions, write_jsonl
+from .pipeline import counterfactual_pairs, metrics, score_predictions, write_jsonl
 
 
 def grounded_correct(row):
@@ -38,26 +38,15 @@ def paired_delta(base, candidate, rounds, seed):
 
 
 def pair_metrics(rows):
-    pairs = defaultdict(list)
-    for row in rows:
-        if row.get("pair_id"):
-            pairs[row["pair_id"]].append(row)
+    pairs = counterfactual_pairs(rows)
     if not pairs:
         return None
-    for key, pair in pairs.items():
-        if (len(pair) != 2 or pair[0]["question"] != pair[1]["question"]
-                or normalize(pair[0]["answer"]) == normalize(pair[1]["answer"])
-                or pair[0].get("split_group", pair[0]["source_group"])
-                != pair[1].get("split_group", pair[1]["source_group"])
-                or pair[0].get("image_sha256", pair[0]["image"])
-                == pair[1].get("image_sha256", pair[1]["image"])):
-            raise ValueError(f"Invalid counterfactual pair: {key}")
     return {
         "pairs": len(pairs),
         "both_answers_correct": sum(all(row["accuracy"] for row in pair)
-                                    for pair in pairs.values()) / len(pairs),
+                                    for pair in pairs) / len(pairs),
         "both_grounded_correct": sum(all(map(grounded_correct, pair))
-                                     for pair in pairs.values()) / len(pairs),
+                                     for pair in pairs) / len(pairs),
     }
 
 

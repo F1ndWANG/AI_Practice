@@ -41,3 +41,11 @@ ai-practice verify runs/acceptance
 | --- | --- |
 | 导入自定义 Agent 任务 | [任务协议及验证](rsi_agent/README.md#自定义任务套件) |
 | 从清单执行完整 GPU 实验 | [训练编排与恢复](vlm_posttraining/README.md#完整实验入口) |
+
+## 导出实验报告
+
+```bash
+ai-practice report runs/acceptance > runs/acceptance-report.md
+```
+
+同一命令也支持 Agent 单独运行目录、多模态成对评测目录和 GPU 实验目录。报告保留样本数、对照结果、区间及可用的推理指标。

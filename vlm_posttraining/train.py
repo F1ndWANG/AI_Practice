@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import time
 from importlib.metadata import version
 from pathlib import Path
 
@@ -119,10 +120,15 @@ def predict(args):
                 with Image.open(row["image"]) as image:
                     inputs = processor(text=[prompt], images=[image.convert("RGB")],
                                        return_tensors="pt").to(model.device)
+                torch.cuda.synchronize(model.device)
+                started = time.perf_counter()
                 response = model.generate(**inputs, do_sample=False, max_new_tokens=192)
-                completion = processor.decode(response[0, inputs.input_ids.shape[1]:],
-                                              skip_special_tokens=True)
-                yield {"id": row["id"], "completion": completion}
+                torch.cuda.synchronize(model.device)
+                seconds = time.perf_counter() - started
+                new_tokens = response[0, inputs.input_ids.shape[1]:]
+                completion = processor.decode(new_tokens, skip_special_tokens=True)
+                yield {"id": row["id"], "completion": completion, "generation_seconds": seconds,
+                       "generated_tokens": new_tokens.numel()}
 
     write_jsonl(args.output, predictions())
 

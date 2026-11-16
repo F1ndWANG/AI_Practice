@@ -94,3 +94,14 @@ CUDA_VISIBLE_DEVICES=0 python -m vlm_posttraining.experiment \
 ```
 
 `experiment.json` 是运行配置，`status.json` 保存阶段状态和哈希，`logs/` 保存训练及推理子进程输出。比较结果位于 `comparison-validation/` 和 `comparison-test/`。此编排入口面向单 GPU，多 GPU 训练可以按上文使用独立阶段命令配置。
+
+## 训练前检查
+
+```bash
+python -m vlm_posttraining.doctor data/manifest.jsonl
+python -m vlm_posttraining.doctor data/manifest.jsonl --gpu
+```
+
+默认检查清单、划分、去重、反事实配对、独立来源组数和无证据样本数。可单独加 `--decode-images` 用 Pillow 解码所有去重后的图像路径。`--gpu` 同时尝试导入训练依赖，检查 CUDA、BF16、可见设备与显存，并解码图片。使用共置 vLLM 时可加 `--vllm` 检查包是否安装。
+
+推理 JSONL 记录同步后的单样本生成耗时和输出 token 数。对比报告汇总 P50/P95 和生成 token 吞吐。计时覆盖 `generate()`，图片读取、预处理和文本解码在计时范围外。

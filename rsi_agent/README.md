@@ -58,3 +58,14 @@ python -m rsi_agent.study runs/my-agent-suite --suite examples/agent_suite.jsonl
 [示例 JSONL](../examples/agent_suite.jsonl) 每行包含唯一 `id`、`split`、`family`、输入文本 `source` 和要逐字匹配的 `expected`。四个阶段分别为 `broad`、`probe`、`practice`、`test`。当前工具注册表支持文本清洗 `words` 和整数求和 `sum`。同一任务族的同一输入不可跨阶段重复，每个探针任务族至少提供一个练习。验证器持有预期文本，执行工具只能读取输入文本。
 
 输出中的 `brs-experience.sqlite` 保留广度探索后快照，`experience.sqlite` 保留深度练习后的状态。报告同时记录自定义套件哈希及留出任务分布。
+
+## 使用模型进行三组对照
+
+配置 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 后，通过 `--model` 为无记忆、BRS 和 BRS+DRS 使用同一个 OpenAI 兼容模型。
+
+```bash
+python -m rsi_agent.study runs/rsi-model --model MODEL_NAME --workers 1
+python -m ai_practice report runs/rsi-model
+```
+
+模型收到任务输入、工具说明、执行历史和当前记忆，不接收验证预期。模型响应错误、未知工具或超预算提议将触发本地配方回退。日志区分模型决策、回退、停止和请求错误，并记录请求耗时。Token 总量仅汇总端点有返回用量的请求，报告同时展示覆盖数。并发数可以按端点限流调整。该入口使用本地任务套件，OSWorld/ALE 仍使用上游运行器。

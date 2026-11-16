@@ -111,13 +111,23 @@ def model_recipe(task, attempts, recalled, model):
                  "Content-Type": "application/json"},
     )
     with urlopen(request, timeout=20) as response:
-        content = json.load(response)["choices"][0]["message"]["content"]
-    recipe = json.loads(content)["recipe"]
+        reply = json.load(response)
+    if not isinstance(reply, dict):
+        return None, None
+    usage = reply.get("usage")
+    tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+    if type(tokens) is not int or tokens < 0:
+        tokens = None
+    try:
+        content = reply["choices"][0]["message"]["content"]
+        recipe = json.loads(content)["recipe"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None, tokens
     if not isinstance(recipe, list) or not 1 <= len(recipe) <= 3 or any(
         not isinstance(tool, str) or tool not in TOOLS for tool in recipe
     ):
-        raise ValueError("invalid tool recipe")
-    return tuple(recipe)
+        return None, tokens
+    return tuple(recipe), tokens
 
 
 def execute(task, recipe):
@@ -155,18 +165,31 @@ def run_task(task, recalled, strategy, budget, model=None):
                                     + [recipe for recipe in candidates if recipe in bad]))
     attempts = []
     planner_errors = []
+    planner_calls = []
     spent = 0
     while spent < budget:
         proposed = None
         if model:
+            started = time.monotonic()
+            tokens = None
+            error_name = None
             try:
-                proposed = model_recipe(task, attempts, recalled, model)
+                proposed, tokens = model_recipe(task, attempts, recalled, model)
+                if proposed is None:
+                    error_name = "InvalidRecipe"
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
-                planner_errors.append(type(error).__name__)
+                error_name = type(error).__name__
+            if error_name:
+                planner_errors.append(error_name)
+            planner_calls.append({"seconds": time.monotonic() - started, "tokens": tokens,
+                                  "error": error_name})
         tried = {tuple(item["recipe"]) for item in attempts}
         choices = [proposed] + candidates
         recipe = next((item for item in choices if item and item not in tried
                        and len(item) <= budget - spent), None)
+        if model:
+            planner_calls[-1]["decision"] = ("stop" if recipe is None else
+                                             "model" if recipe == proposed else "fallback")
         if recipe is None:
             break
         success, calls = execute(task, recipe)
@@ -178,7 +201,8 @@ def run_task(task, recalled, strategy, budget, model=None):
         if success:
             break
     return {"task": task.family, "success": bool(attempts and attempts[-1]["success"]),
-            "tool_calls": spent, "planner_errors": planner_errors, "attempts": attempts}
+            "tool_calls": spent, "planner_errors": planner_errors,
+            "planner_calls": planner_calls, "attempts": attempts}
 
 
 def consolidate(memory, results):

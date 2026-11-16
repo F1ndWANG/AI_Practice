@@ -3,8 +3,9 @@
 import argparse
 import hashlib
 import json
+import math
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
@@ -29,6 +30,27 @@ def normalize(text):
 
 def evidence_set(values):
     return {normalize(value) for value in values}
+
+
+def counterfactual_pairs(rows):
+    pairs = defaultdict(list)
+    for row in rows:
+        label = row.get("pair_id")
+        if label is None:
+            continue
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(f"Invalid pair_id on {row['id']}")
+        pairs[label].append(row)
+    for label, items in pairs.items():
+        if len(items) != 2:
+            raise ValueError(f"Counterfactual pair {label} requires exactly two samples")
+        a, b = items
+        if (a["question"] != b["question"] or normalize(a["answer"]) == normalize(b["answer"])
+                or a.get("split") != b.get("split")
+                or a.get("split_group", a["source_group"]) != b.get("split_group", b["source_group"])
+                or a.get("image_sha256", a["image"]) == b.get("image_sha256", b["image"])):
+            raise ValueError(f"Invalid counterfactual pair: {label}")
+    return list(pairs.values())
 
 
 def prepare(source, output, seed):
@@ -102,11 +124,14 @@ def prepare(source, output, seed):
         by_split[split].append({**row, "split": split, "split_group": group[1]})
     if not all(by_split.values()):
         raise ValueError("Every split needs data. Assign explicit splits or add independent source groups.")
+    pairs = counterfactual_pairs(row for entries in by_split.values() for row in entries)
+    pair_counts = Counter(pair[0]["split"] for pair in pairs)
     summary = {"input": len(rows), "duplicates_removed": duplicate_count, "splits": {}}
     for split, entries in by_split.items():
         write_jsonl(output / f"{split}.jsonl", entries)
         summary["splits"][split] = {
-            "count": len(entries), "task_difficulty": dict(Counter(
+            "count": len(entries), "counterfactual_pairs": pair_counts[split],
+            "task_difficulty": dict(Counter(
                 f"{row['task']}/{row['difficulty']}" for row in entries
             )),
         }
@@ -145,14 +170,22 @@ def score_predictions(manifest, predictions):
     for row in read_jsonl(predictions):
         if row["id"] in by_id:
             raise ValueError(f"Duplicate prediction: {row['id']}")
-        by_id[row["id"]] = row["completion"]
+        by_id[row["id"]] = row
     ids = {row["id"] for row in references}
     if not references or len(ids) != len(references) or set(by_id) != ids:
         raise ValueError("Predictions must match the nonempty manifest exactly")
-    return [
-        {**row, "completion": by_id[row["id"]], **score(by_id[row["id"]], row["answer"], row["evidence"])}
-        for row in references
-    ]
+    scored = []
+    for row in references:
+        prediction = by_id[row["id"]]
+        completion = prediction["completion"]
+        scored.append({
+            **row, "completion": completion,
+            "generation_seconds": prediction.get("generation_seconds"),
+            "generated_tokens": prediction.get("generated_tokens"),
+            **score(completion, row["answer"], row["evidence"]),
+        })
+    return scored
+
 
 def evaluate(manifest, predictions, review):
     scored = score_predictions(manifest, predictions)
@@ -162,10 +195,30 @@ def evaluate(manifest, predictions, review):
     return {"overall": metrics(scored), "by_task": {key: metrics(rows) for key, rows in task_slices.items()}}
 
 
+def performance(rows):
+    measured = []
+    for row in rows:
+        seconds, tokens = row.get("generation_seconds"), row.get("generated_tokens")
+        if seconds is None and tokens is None:
+            continue
+        if (type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0
+                or type(tokens) is not int or tokens < 0):
+            raise ValueError(f"Invalid generation measurements: {row['id']}")
+        measured.append((seconds, tokens))
+    if not measured:
+        return None
+    times = sorted(seconds for seconds, _ in measured)
+    total_tokens = sum(tokens for _, tokens in measured)
+    return {"measured": len(measured), "p50_seconds": times[math.ceil(0.50 * len(times)) - 1],
+            "p95_seconds": times[math.ceil(0.95 * len(times)) - 1],
+            "generated_tokens_per_second": total_tokens / sum(times)}
+
+
 def metrics(rows):
     parsed = [row for row in rows if row["format"]]
     return {
         "n": len(rows),
+        "generation_performance": performance(rows),
         **{key: sum(row[key] for row in rows) / len(rows)
            for key in ("accuracy", "format", "evidence")},
         "unsupported_evidence_rate_among_valid": (
