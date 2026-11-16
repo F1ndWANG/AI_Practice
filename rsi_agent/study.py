@@ -9,6 +9,7 @@ import shutil
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import asdict
 from pathlib import Path
 
 from ai_practice.artifacts import sha256
@@ -151,6 +152,11 @@ def study(output, seed=42, per_family=8, budget=6, workers=4, suite=None, model=
         for phase, count in (("broad", 2), ("probe", 1), ("practice", 1), ("test", per_family))
     }
     output.mkdir(parents=True, exist_ok=False)
+    snapshot_file = output / "tasks.jsonl"
+    snapshot_file.write_text("".join(
+        json.dumps({"id": case_id, "split": phase, **asdict(task)}, ensure_ascii=False) + "\n"
+        for phase, items in tasks.items() for case_id, task in items
+    ), encoding="utf-8")
     database = output / "experience.sqlite"
     held_out = tasks["test"]
     baseline = [execute_case(case, None, budget, model=model) for case in held_out]
@@ -176,6 +182,7 @@ def study(output, seed=42, per_family=8, budget=6, workers=4, suite=None, model=
                                      for label, rows in traces.items()} for family in family_names},
                "exploration": {"brs": summarize(broad), "drs": summarize(deep)},
                "suite_sha256": sha256(suite) if suite else None,
+               "task_snapshot_sha256": sha256(snapshot_file),
                "test_tasks_by_family": dict(Counter(task.family for _, task in held_out)),
                "variants": {label: summarize(rows) for label, rows in traces.items()},
                "exploration_tool_calls": {"brs": sum(row["tool_calls"] for row in broad),

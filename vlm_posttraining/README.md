@@ -144,3 +144,22 @@ python -m ai_practice report runs/data-mix
 样本 ID、来源组和反事实配对 ID 加入数据集前缀。相对图像路径按各自清单解析。显式划分会保留，与全局图像哈希或来源分组冲突时整次导入失败。完全重复且标注一致的样本保留按数据集名称排序遇到的第一条，审计记录各来源的保留量与去重数。跨来源泄漏检查覆盖相同文件内容。同一原始文档的不同裁图或重编码版本，可在各清单中标注相同的 `shared_source_group`，将它们锁定到同一划分。同一清单中同一来源组的所有样本须使用一致的共享标记。
 
 使用 `runs/data-mix/manifest.jsonl` 作为 GPU 实验入口的输入，实验继续按完整清单做一致性校验。若混合时指定了 `--seed`，实验应传入同一值。训练报告中的 `by_dataset` 提供分来源的答案与证据指标，避免总体平均值掩盖单个数据集退化。
+
+## 盲测清单与评分端校验
+
+实验入口为验证集和留出测试集分别生成 `inference/<split>.jsonl`，推理子进程只接收样本 ID、图像、问题、证据任务模式和图像哈希。原始答案、别名和证据标注留在评分端的 `prepared/`。恢复运行时，预测和对比阶段会核对输入依赖的哈希。首次恢复旧实验时会为原预测阶段补建盲测清单，并重跑相应预测和对比阶段。
+
+可独立执行推理与评测。推理机需要能按清单中的绝对路径访问同一批图像。
+
+```bash
+python -m vlm_posttraining.blind build runs/vlm/prepared/test.jsonl \
+  runs/dispatch/test.jsonl runs/vlm/test-binding.json
+python -m vlm_posttraining.train predict runs/dispatch/test.jsonl runs/test-predictions.jsonl \
+  --adapter runs/vlm/sft
+python -m vlm_posttraining.blind verify runs/vlm/prepared/test.jsonl \
+  runs/dispatch/test.jsonl runs/vlm/test-binding.json
+python -m vlm_posttraining.pipeline evaluate runs/vlm/prepared/test.jsonl \
+  runs/test-predictions.jsonl runs/test-review.jsonl
+```
+
+只交付推理清单和图像给推理端。绑定文件应和带标注清单一起保存于可信评分端。校验核对清单、样本内容及图像文件。评测按 ID 对齐，并拒绝缺少、重复或额外的预测。

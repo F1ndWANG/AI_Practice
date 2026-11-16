@@ -52,11 +52,14 @@ class DeliveryTests(unittest.TestCase):
                 stage, input_path, destination, *flags = arguments
                 calls.append((stage, destination.name))
                 if stage == "predict":
+                    self.assertTrue(all("answer" not in row and "evidence" not in row
+                                        for row in read_jsonl(input_path)))
+                    reference = output / "prepared" / input_path.name
                     write_jsonl(destination, (
                         {"id": row["id"], "completion": json.dumps({
                             key: row[key] for key in ("answer", "evidence")
                         })}
-                        for row in read_jsonl(input_path)
+                        for row in read_jsonl(reference)
                     ))
                     return
                 paths = adapter_paths(destination)

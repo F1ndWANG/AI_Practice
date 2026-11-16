@@ -88,6 +88,12 @@ class Memory:
         )
         return [(tuple(json.loads(recipe)), wins, losses) for recipe, wins, losses in rows]
 
+    def entries(self):
+        for family, recipe, wins, losses in self.connection.execute(
+            "SELECT family, recipe, wins, losses FROM experience"
+        ):
+            yield family, tuple(json.loads(recipe)), wins, losses
+
     def update(self, family, recipe, success):
         if self.frozen:
             return

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ai_practice.artifacts import artifact_index, sha256, verify_index, write_json
 
+from .blind import build as build_blind, verify as verify_blind
 from .compare import compare
 from .pipeline import prepare, validate_images
 from .train import DEFAULT_MODEL
@@ -47,16 +48,18 @@ def execute(output, manifest, config, evaluate_test):
     prepared = output / "prepared"
     training = prepared / "train.jsonl"
 
-    def stage(name, outputs, action):
+    def stage(name, outputs, action, inputs=()):
         earlier = stages.get(name, {})
-        if earlier.get("state") == "completed":
+        dependencies = artifact_index(output, inputs)
+        if earlier.get("state") == "completed" and earlier.get("inputs", {}) == dependencies:
             verify_index(output, earlier["artifacts"])
             return
         stages[name] = {"state": "running"}
         write_json(status_path, status)
         try:
             action()
-            stages[name] = {"state": "completed", "artifacts": artifact_index(output, outputs)}
+            stages[name] = {"state": "completed", "artifacts": artifact_index(output, outputs),
+                            "inputs": dependencies}
         except Exception as error:
             stages[name] = {"state": "failed", "error": str(error)}
             raise
@@ -96,14 +99,20 @@ def execute(output, manifest, config, evaluate_test):
     splits = ("validation", "test") if evaluate_test else ("validation",)
     for split in splits:
         evaluation = prepared / f"{split}.jsonl"
+        dispatch = output / "inference" / f"{split}.jsonl"
+        binding = prepared / f"{split}-binding.json"
+        stage(f"dispatch_{split}", [dispatch, binding],
+              lambda: build_blind(evaluation, dispatch, binding), [evaluation])
+        verify_blind(evaluation, dispatch, binding)
         predictions = {}
         for name, adapter in adapters.items():
             pred = output / f"{split}-{name}.jsonl"
-            args = ["predict", evaluation, pred, *common]
+            args = ["predict", dispatch, pred, *common]
             if adapter:
                 args.extend(["--adapter", adapter])
+            inputs = [dispatch] + (adapter_paths(adapter) if adapter else [])
             stage(f"predict_{split}_{name}", [pred],
-                  lambda: launch(args, logs / f"predict_{split}_{name}.log"))
+                  lambda: launch(args, logs / f"predict_{split}_{name}.log"), inputs)
             predictions[name] = pred
 
         report_path = output / f"comparison-{split}"
@@ -118,7 +127,7 @@ def execute(output, manifest, config, evaluate_test):
             compare(evaluation, predictions, report_path, seed=config["seed"])
 
         stage(f"compare_{split}", [report_path / "summary.json", report_path / "review.jsonl"],
-              compare_split)
+              compare_split, [evaluation, binding, *predictions.values()])
     return status
 
 
