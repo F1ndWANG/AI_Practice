@@ -45,7 +45,11 @@ def counterfactual_pairs(rows):
         if len(items) != 2:
             raise ValueError(f"Counterfactual pair {label} requires exactly two samples")
         a, b = items
-        if (a["question"] != b["question"] or normalize(a["answer"]) == normalize(b["answer"])
+        a_answers, b_answers = (
+            {normalize(item) for item in [row["answer"], *row.get("answer_aliases", ())]}
+            for row in items
+        )
+        if (a["question"] != b["question"] or a_answers & b_answers
                 or a.get("split") != b.get("split")
                 or a.get("split_group", a["source_group"]) != b.get("split_group", b["source_group"])
                 or a.get("image_sha256", a["image"]) == b.get("image_sha256", b["image"])):
@@ -83,6 +87,12 @@ def prepare(source, output, seed):
             isinstance(item, str) and item.strip() for item in evidence
         ):
             raise ValueError(f"Invalid evidence: {entry['id']}")
+        aliases = entry.get("answer_aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(item, str) and item.strip() for item in aliases):
+            raise ValueError(f"Invalid answer_aliases: {entry['id']}")
+        observed = entry.get("evidence_observed", True)
+        if type(observed) is not bool or (not observed and evidence):
+            raise ValueError(f"Invalid evidence_observed: {entry['id']}")
         split = entry.get("split")
         if split is not None and split not in partitions:
             raise ValueError(f"Unknown split: {split}")
@@ -98,7 +108,8 @@ def prepare(source, output, seed):
         image_root, source_root = root(image_key), root(source_key)
         parents[max(image_root, source_root)] = min(image_root, source_root)
         key = (digest, normalize(entry["question"]))
-        signature = (normalize(entry["answer"]), frozenset(evidence_set(evidence)))
+        signature = (frozenset(map(normalize, [entry["answer"], *aliases])),
+                     frozenset(evidence_set(evidence)), observed)
         duplicate = key in seen_samples
         if duplicate and seen_samples[key] != signature:
             raise ValueError(f"Conflicting annotation for {entry['id']}")
@@ -138,7 +149,7 @@ def prepare(source, output, seed):
     return summary
 
 
-def score(completion, answer, evidence):
+def score(completion, answer, evidence, aliases=(), evidence_observed=True):
     try:
         result = json.loads(completion)
     except (ValueError, TypeError):
@@ -147,21 +158,22 @@ def score(completion, answer, evidence):
         isinstance(result["answer"], str) and isinstance(result["evidence"], list)
         and all(isinstance(item, str) and item.strip() for item in result["evidence"])
     ):
-        return {"accuracy": 0.0, "format": 0.0, "evidence": 0.0, "errors": ["invalid_format"]}
-    correct = normalize(result["answer"]) == normalize(answer)
+        return {"accuracy": 0.0, "format": 0.0,
+                "evidence": 0.0 if evidence_observed else None, "errors": ["invalid_format"]}
+    correct = normalize(result["answer"]) in set(map(normalize, [answer, *aliases]))
     expected = evidence_set(evidence)
     predicted = evidence_set(result["evidence"])
     denom = len(expected) + len(predicted)
     errors = []
     if not correct:
         errors.append("answer_mismatch")
-    if predicted - expected:
+    if evidence_observed and predicted - expected:
         errors.append("unsupported_evidence")
-    if expected - predicted:
+    if evidence_observed and expected - predicted:
         errors.append("missing_evidence")
+    evidence_f1 = (2 * len(expected & predicted) / denom if denom else 1.0)
     return {"accuracy": float(correct), "format": 1.0,
-            "evidence": 2 * len(expected & predicted) / denom if denom else 1.0,
-            "errors": errors}
+            "evidence": evidence_f1 if evidence_observed else None, "errors": errors}
 
 
 def score_predictions(manifest, predictions):
@@ -179,10 +191,11 @@ def score_predictions(manifest, predictions):
         prediction = by_id[row["id"]]
         completion = prediction["completion"]
         scored.append({
-            **row, "completion": completion,
+            **row, "completion": completion, "reference_evidence": row["evidence"],
             "generation_seconds": prediction.get("generation_seconds"),
             "generated_tokens": prediction.get("generated_tokens"),
-            **score(completion, row["answer"], row["evidence"]),
+            **score(completion, row["answer"], row["evidence"],
+                    row.get("answer_aliases", ()), row.get("evidence_observed", True)),
         })
     return scored
 
@@ -215,12 +228,15 @@ def performance(rows):
 
 
 def metrics(rows):
-    parsed = [row for row in rows if row["format"]]
+    observed = [row for row in rows if row["evidence"] is not None]
+    parsed = [row for row in observed if row["format"]]
     return {
         "n": len(rows),
         "generation_performance": performance(rows),
         **{key: sum(row[key] for row in rows) / len(rows)
-           for key in ("accuracy", "format", "evidence")},
+           for key in ("accuracy", "format")},
+        "evidence_annotated": len(observed),
+        "evidence": sum(row["evidence"] for row in observed) / len(observed) if observed else None,
         "unsupported_evidence_rate_among_valid": (
             sum("unsupported_evidence" in row["errors"] for row in parsed) / len(parsed)
             if parsed else None
@@ -229,10 +245,11 @@ def metrics(rows):
     }
 
 
-def messages(question):
+def messages(question, evidence_observed=True):
+    instruction = ("Each evidence item must be a short observable fact from this image."
+                   if evidence_observed else "Provide the answer and use an empty evidence array.")
     return [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": (
-        f"{question}\nReturn exactly a JSON object with string answer and array evidence. "
-        "Each evidence item must be a short observable fact from this image."
+        f"{question}\nReturn exactly a JSON object with string answer and array evidence. " + instruction
     )}]}]
 
 

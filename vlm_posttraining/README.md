@@ -105,3 +105,29 @@ python -m vlm_posttraining.doctor data/manifest.jsonl --gpu
 默认检查清单、划分、去重、反事实配对、独立来源组数和无证据样本数。可单独加 `--decode-images` 用 Pillow 解码所有去重后的图像路径。`--gpu` 同时尝试导入训练依赖，检查 CUDA、BF16、可见设备与显存，并解码图片。使用共置 vLLM 时可加 `--vllm` 检查包是否安装。
 
 推理 JSONL 记录同步后的单样本生成耗时和输出 token 数。对比报告汇总 P50/P95 和生成 token 吞吐。计时覆盖 `generate()`，图片读取、预处理和文本解码在计时范围外。
+
+## 导入 DocVQA
+
+使用已获得授权并保存在本地的 [DocVQA Task 1 图像与标注](https://site.docvqa.org/datasets)。图像根目录需能解析标注中的 `image` 路径。
+
+```bash
+python -m vlm_posttraining.import_docvqa /data/docvqa runs/docvqa.jsonl \
+  --annotations auto=/data/docvqa/train.json --annotations validation=/data/docvqa/val.json
+python -m vlm_posttraining.doctor runs/docvqa.jsonl
+```
+
+`--annotations` 可重复，前缀可用 `auto`、`train`、`validation` 或 `test`。`auto` 让准备阶段按文档来源划分，可用于从有标签的训练数据保留内部测试子集。若已有独立且带标签的划分，可显式传入三个文件。官方无标签测试文件需要提交至对应评测入口。
+
+答案比较接受标注中的各个答案变体。未标注证据的样本走仅回答指令，其证据奖励为零，且从证据 F1、严格证据准确率和对应统计区间的分母中排除。答案准确率及其配对变化覆盖有答案标注的所有样本。导入后按文档 ID 和图像哈希验证隔离。此处使用仓库的精确匹配指标，可用于内部实验。
+
+## 单图复核与模型导出
+
+```bash
+python -m vlm_posttraining.inference document.png "What is the invoice total?" \
+  --adapter runs/vlm/sft --answer-only
+python -m vlm_posttraining.export runs/vlm/sft runs/vlm/sft-merged
+python -m vlm_posttraining.inference document.png "What is the invoice total?" \
+  --model runs/vlm/sft-merged --answer-only
+```
+
+单图复核与批量评测复用相同生成逻辑。默认使用 CUDA BF16，可指定 `--device cpu` 使用 FP32 推理。导出通过 PEFT 安全合并 LoRA，写入模型分片、处理器和 adapter 哈希。合并需准备容纳完整模型的内存和磁盘空间，也可用 `--dtype fp32` 导出。参考 [PEFT 模型存储说明](https://huggingface.co/docs/peft/developer_guides/checkpoint#model-storage)。

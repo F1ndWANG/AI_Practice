@@ -51,6 +51,9 @@ def inspect_dataset(source, seed, decode):
             rows = list(read_jsonl(prepared / f"{split}.jsonl"))
             report["splits"][split]["source_groups"] = len({row["split_group"] for row in rows})
             report["splits"][split]["without_evidence"] = sum(not row["evidence"] for row in rows)
+            report["splits"][split]["unannotated_evidence"] = sum(
+                not row.get("evidence_observed", True) for row in rows
+            )
             for row in rows:
                 image_path = row["image"]
                 if image_path in checked:

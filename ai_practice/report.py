@@ -25,12 +25,20 @@ def agent_lines(summary):
                      requests, value.get("model_fallbacks", 0), value.get("model_request_errors", 0),
                      value.get("model_tokens_reported") if value.get("model_tokens_reported") is not None else "—",
                      coverage))
+    families = [
+        (family, variant, value["tasks"], percent(value["success_rate"]), value["tool_calls"])
+        for family, variants in summary.get("families", {}).items()
+        for variant, value in variants.items()
+    ]
+    breakdown = (table(("任务族", "设置", "任务数", "成功率", "工具调用"), families) + [""]
+                 if families else [])
     return [
         "## RSIAgent", "",
         *table(("设置", "任务数", "成功率", "测试工具调用", "模型请求", "回退", "请求错误",
                 "已报告 Tokens", "用量覆盖"), rows), "",
         f"探索工具调用（BRS / DRS）  {summary['exploration_tool_calls']['brs']} / "
         f"{summary['exploration_tool_calls']['drs']}", "",
+        *breakdown,
     ]
 
 
@@ -49,18 +57,27 @@ def vision_lines(summary, name):
                      percent(overall["evidence"]), percent(result["grounded_accuracy"]),
                      percent(pairs["both_answers_correct"]) if pairs else "—"))
     deltas = []
+    answers = []
     for variant, result in summary["paired"].items():
+        answer = result.get("answer_accuracy")
+        if answer:
+            bounds = answer["bootstrap_95"]
+            interval = "—" if bounds is None else " 至 ".join(map(percent, bounds))
+            answers.append((variant, percent(answer["delta_accuracy"]), interval, answer["samples"]))
         bounds = result["bootstrap_95"]
         interval = "—" if bounds is None else " 至 ".join(map(percent, bounds))
         deltas.append((variant, percent(result["delta_grounded_accuracy"]), interval,
                        result["improved"], result["regressed"], result["groups"]))
     speed = (table(("设置", "计时样本", "P50 秒", "P95 秒", "生成 Tokens/秒"), performance) + [""]
              if performance else [])
+    answer_table = (table(("对比设置", "答案准确率变化", "95% bootstrap 区间", "样本数"), answers) + [""]
+                    if answers else [])
     return [
         f"## {name}", "",
         *table(("设置", "样本数", "答案准确率", "格式合规率", "证据 F1", "严格证据准确率",
                 "双图全对率"), rows), "",
         *speed,
+        *answer_table,
         *table(("对比设置", "严格证据准确率变化", "95% bootstrap 区间", "改善", "退化", "来源组"), deltas),
         "", f"清单 SHA-256  `{summary['manifest_sha256']}`", "",
     ]

@@ -1,6 +1,8 @@
 """Run a matched, seeded exploration ablation on local Python/Bash tasks."""
 
 import argparse
+import csv
+import io
 import json
 import random
 import shutil
@@ -14,7 +16,7 @@ from ai_practice.artifacts import sha256
 from .runtime import POLICIES, Memory, Task, consolidate, run_task
 
 
-def cases(seed, split, per_family):
+def cases(seed, split, per_family, extended=False):
     rng = random.Random(f"{seed}:{split}")
     rows = []
     for index in range(per_family):
@@ -29,6 +31,24 @@ def cases(seed, split, per_family):
         presentation = "\n" if split == "broad" else "  "
         rows.append((f"{split}:sum:{index}",
                      Task("sum", presentation.join(map(str, numbers)) + "\n", f"{sum(numbers)}\n")))
+        if extended:
+            prefix = f"{split}-{index}"
+            first, second = rng.randrange(1000), rng.randrange(1000)
+            item = f'"a": {first}, "z": {{"n": {second}}}'
+            if split != "broad":
+                item = f'"z": {{"n": {second}}}, "a": {first}'
+            rows.append((f"{split}:json:{index}", Task(
+                "json", "{" + item + "}", f'{{"a":{first},"z":{{"n":{second}}}}}' + "\n",
+            )))
+            category = prefix if split == "broad" else f"{prefix}, East"
+            stream = io.StringIO(newline="")
+            writer = csv.writer(stream, lineterminator="\n")
+            writer.writerows([("category", "amount"), (category, first), ("shared", second),
+                              (category, -1)])
+            expected = f"{category}\t{first - 1}\nshared\t{second}\n"
+            if category > "shared":
+                expected = f"shared\t{second}\n{category}\t{first - 1}\n"
+            rows.append((f"{split}:csv:{index}", Task("csv", stream.getvalue(), expected)))
     return rows
 
 
@@ -125,9 +145,9 @@ def summarize(rows):
     }
 
 
-def study(output, seed=42, per_family=8, budget=6, workers=4, suite=None, model=None):
+def study(output, seed=42, per_family=8, budget=6, workers=4, suite=None, model=None, extended=False):
     tasks = load_suite(suite) if suite else {
-        phase: cases(seed, phase, count)
+        phase: cases(seed, phase, count, extended)
         for phase, count in (("broad", 2), ("probe", 1), ("practice", 1), ("test", per_family))
     }
     output.mkdir(parents=True, exist_ok=False)
@@ -150,7 +170,10 @@ def study(output, seed=42, per_family=8, budget=6, workers=4, suite=None, model=
         (output / f"{label}.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
         )
+    family_names = sorted({task.family for _, task in held_out})
     summary = {"seed": seed, "test_budget_per_task": budget, "model": model,
+               "families": {family: {label: summarize([row for row in rows if row["task"] == family])
+                                     for label, rows in traces.items()} for family in family_names},
                "exploration": {"brs": summarize(broad), "drs": summarize(deep)},
                "suite_sha256": sha256(suite) if suite else None,
                "test_tasks_by_family": dict(Counter(task.family for _, task in held_out)),
@@ -170,10 +193,13 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--suite", type=Path, help="Optional task suite JSONL")
     parser.add_argument("--model", help="Optional OpenAI-compatible model for all variants")
+    parser.add_argument("--extended", action="store_true", help="Include JSON and CSV tasks")
     args = parser.parse_args()
+    if args.extended and args.suite:
+        parser.error("--extended applies to the built-in suite")
     if min(args.per_family, args.budget, args.workers) < 1:
         parser.error("per-family, budget and workers must be positive")
-    print(json.dumps(study(args.output, args.seed, args.per_family, args.budget, args.workers, args.suite, args.model), indent=2))
+    print(json.dumps(study(args.output, args.seed, args.per_family, args.budget, args.workers, args.suite, args.model, args.extended), indent=2))
 
 
 if __name__ == "__main__":

@@ -14,11 +14,14 @@ def grounded_correct(row):
     return bool(row["accuracy"] and row["evidence"] == 1.0)
 
 
-def paired_delta(base, candidate, rounds, seed):
+def paired_delta(base, candidate, rounds, seed, *, use_evidence=True):
     groups = defaultdict(list)
     improved = regressed = 0
     for left, right in zip(base, candidate):
-        change = int(grounded_correct(right)) - int(grounded_correct(left))
+        if use_evidence and left["evidence"] is None:
+            continue
+        change = (int(grounded_correct(right)) - int(grounded_correct(left)) if use_evidence
+                  else int(right["accuracy"]) - int(left["accuracy"]))
         groups[left.get("split_group", left["source_group"])].append(change)
         improved += change == 1
         regressed += change == -1
@@ -32,8 +35,10 @@ def paired_delta(base, candidate, rounds, seed):
             bootstrap.append(sum(total for total, _ in draw) / sum(size for _, size in draw))
         bootstrap.sort()
         interval = [bootstrap[int(q * (rounds - 1))] for q in (0.025, 0.975)]
-    return {"delta_grounded_accuracy": (improved - regressed) / len(base),
-            "bootstrap_95": interval, "groups": len(groups),
+    eligible = sum(size for _, size in group_totals)
+    key = "delta_grounded_accuracy" if use_evidence else "delta_accuracy"
+    return {key: (improved - regressed) / eligible if eligible else None,
+            "bootstrap_95": interval, "groups": len(groups), "samples": eligible,
             "improved": improved, "regressed": regressed}
 
 
@@ -41,12 +46,13 @@ def pair_metrics(rows):
     pairs = counterfactual_pairs(rows)
     if not pairs:
         return None
+    annotated = [pair for pair in pairs if all(row["evidence"] is not None for row in pair)]
     return {
-        "pairs": len(pairs),
+        "pairs": len(pairs), "evidence_annotated_pairs": len(annotated),
         "both_answers_correct": sum(all(row["accuracy"] for row in pair)
                                     for pair in pairs) / len(pairs),
         "both_grounded_correct": sum(all(map(grounded_correct, pair))
-                                     for pair in pairs) / len(pairs),
+                                     for pair in annotated) / len(annotated) if annotated else None,
     }
 
 
@@ -62,25 +68,31 @@ def compare(manifest, predictions, output, rounds=1000, seed=42):
         if name == baseline:
             continue
         paired[name] = paired_delta(reference, rows, rounds, seed)
+        paired[name]["answer_accuracy"] = paired_delta(reference, rows, rounds, seed, use_evidence=False)
         for left, right in zip(reference, rows):
             if not left["errors"] and not right["errors"]:
                 continue
             reviews.append({
-                **{key: left[key] for key in ("id", "image", "question", "answer", "evidence",
+                **{key: left[key] for key in ("id", "image", "question", "answer",
                                               "task", "difficulty")},
+                "answer_aliases": left.get("answer_aliases", []),
+                "evidence": left["reference_evidence"],
+                "evidence_observed": left.get("evidence_observed", True),
                 "baseline": baseline, "candidate": name,
                 "baseline_completion": left["completion"], "candidate_completion": right["completion"],
                 "baseline_errors": left["errors"], "candidate_errors": right["errors"],
-                "grounded_change": int(grounded_correct(right)) - int(grounded_correct(left)),
+                "grounded_change": (None if left["evidence"] is None else
+                                    int(grounded_correct(right)) - int(grounded_correct(left))),
             })
     variants = {}
     for name, rows in runs.items():
         slices = defaultdict(list)
         for row in rows:
             slices[f"{row['task']}/{row['difficulty']}"].append(row)
-        variants[name] = {"overall": metrics(rows),
-                          "counterfactual": pair_metrics(rows),
-                          "grounded_accuracy": sum(map(grounded_correct, rows)) / len(rows),
+        overall = metrics(rows)
+        eligible = overall["evidence_annotated"]
+        variants[name] = {"overall": overall, "counterfactual": pair_metrics(rows),
+                          "grounded_accuracy": sum(map(grounded_correct, rows)) / eligible if eligible else None,
                           "by_task_difficulty": {key: metrics(items) for key, items in sorted(slices.items())}}
     report = {"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
               "baseline": baseline, "bootstrap_rounds": rounds, "seed": seed,

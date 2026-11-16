@@ -4,13 +4,11 @@ import argparse
 import hashlib
 import json
 import math
-import time
 from importlib.metadata import version
 from pathlib import Path
 
+from .inference import DEFAULT_MODEL, VisualModel
 from .pipeline import messages, read_jsonl, score, write_jsonl
-
-DEFAULT_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
 def multimodal_dataset(path, stage):
@@ -20,26 +18,33 @@ def multimodal_dataset(path, stage):
     for row in read_jsonl(path):
         if row.get("split") != "train":
             raise ValueError("Training requires a prepared train manifest")
-        prompt = messages(row["question"])
+        observed = row.get("evidence_observed", True)
+        prompt = messages(row["question"], observed)
         if stage == "sft":
             payload = json.dumps({key: row[key] for key in ("answer", "evidence")}, ensure_ascii=False)
             rows.append({"prompt": prompt, "image": row["image"],
                          "completion": [{"role": "assistant", "content": [{"type": "text", "text": payload}]}]})
         else:
             rows.append({"prompt": prompt, "image": row["image"],
-                         "answer": row["answer"], "evidence": row["evidence"]})
+                         "answer": row["answer"], "evidence": row["evidence"],
+                         "answer_aliases": row.get("answer_aliases", []), "evidence_observed": observed})
     if not rows:
         raise ValueError("Training manifest is empty")
     return Dataset.from_list(rows).cast_column("image", Image())
 
 
-def reward(completions, answer, evidence, *, evidence_weight=0.5, **kwargs):
+def reward(completions, answer, evidence, *, evidence_weight=0.5,
+           answer_aliases=None, evidence_observed=None, **kwargs):
     rewards = []
-    for completion, expected_answer, expected_evidence in zip(completions, answer, evidence):
+    aliases = answer_aliases if answer_aliases is not None else [()] * len(completions)
+    observed = evidence_observed if evidence_observed is not None else [True] * len(completions)
+    for completion, expected_answer, expected_evidence, options, annotated in zip(
+        completions, answer, evidence, aliases, observed
+    ):
         if isinstance(completion, list):
             completion = completion[0]["content"] if completion else ""
-        result = score(completion, expected_answer, expected_evidence)
-        rewards.append(result["accuracy"] + 0.2 * result["format"] + evidence_weight * result["evidence"])
+        result = score(completion, expected_answer, expected_evidence, options, annotated)
+        rewards.append(result["accuracy"] + 0.2 * result["format"] + evidence_weight * (result["evidence"] or 0.0))
     return rewards
 
 
@@ -73,7 +78,9 @@ def train(args):
                             vllm_mode="colocate", vllm_gpu_memory_utilization=0.25)
 
         def visual_reward(completions, answer, evidence, **kwargs):
-            return reward(completions, answer, evidence, evidence_weight=args.evidence_weight)
+            return reward(completions, answer, evidence, evidence_weight=args.evidence_weight,
+                          answer_aliases=kwargs.get("answer_aliases"),
+                          evidence_observed=kwargs.get("evidence_observed"))
 
         trainer = GRPOTrainer(model=policy, args=config, reward_funcs=visual_reward, **common)
 
@@ -101,34 +108,12 @@ def train(args):
 
 
 def predict(args):
-    import torch
-    from peft import PeftModel
-    from PIL import Image
-    from transformers import AutoModelForImageTextToText, AutoProcessor
-
-    processor = AutoProcessor.from_pretrained(args.model)
-    model = AutoModelForImageTextToText.from_pretrained(args.model, dtype=torch.bfloat16)
-    if args.adapter:
-        model = PeftModel.from_pretrained(model, str(args.adapter))
-    model.to("cuda").eval()
+    model = VisualModel(args.model, args.adapter)
 
     def predictions():
-        with torch.inference_mode():
-            for row in read_jsonl(args.manifest):
-                prompt = processor.apply_chat_template(messages(row["question"]), tokenize=False,
-                                                       add_generation_prompt=True)
-                with Image.open(row["image"]) as image:
-                    inputs = processor(text=[prompt], images=[image.convert("RGB")],
-                                       return_tensors="pt").to(model.device)
-                torch.cuda.synchronize(model.device)
-                started = time.perf_counter()
-                response = model.generate(**inputs, do_sample=False, max_new_tokens=192)
-                torch.cuda.synchronize(model.device)
-                seconds = time.perf_counter() - started
-                new_tokens = response[0, inputs.input_ids.shape[1]:]
-                completion = processor.decode(new_tokens, skip_special_tokens=True)
-                yield {"id": row["id"], "completion": completion, "generation_seconds": seconds,
-                       "generated_tokens": new_tokens.numel()}
+        for row in read_jsonl(args.manifest):
+            result = model.ask(row["image"], row["question"], row.get("evidence_observed", True))
+            yield {"id": row["id"], **result}
 
     write_jsonl(args.output, predictions())
 

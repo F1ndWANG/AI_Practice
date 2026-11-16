@@ -47,13 +47,21 @@ TOOLS = {
             "from pathlib import Path; "
             "Path('output.txt').write_text(str(sum(map(int, Path('input.txt').read_text().split()))) + chr(10))"),
 }
+for operation in ("json_compact", "json_canonical", "csv_simple_totals", "csv_totals"):
+    TOOLS[operation] = (sys.executable, "-I", str(Path(__file__).with_name("local_tools.py").resolve()),
+                        operation)
+
 HINTS = {
     "words": "Trim each input line, lowercase its text, then sort and deduplicate.",
     "sum": "Add the signed integers and write the decimal sum plus a newline.",
+    "json": "Write compact UTF-8 JSON with recursively sorted keys and a newline.",
+    "csv": "Sum integer amounts by category in CSV. Write sorted category-tab-total lines.",
 }
 POLICIES = {
     "words": [("copy",), ("sort",), ("normalize", "sort_normalized")],
     "sum": [("copy",), ("count",), ("sum",)],
+    "json": [("copy",), ("json_compact",), ("json_canonical",)],
+    "csv": [("copy",), ("csv_simple_totals",), ("csv_totals",)],
 }
 
 
