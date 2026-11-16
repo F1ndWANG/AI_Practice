@@ -1,0 +1,6 @@
+{"id":"broad-words","split":"broad","family":"words","source":"pear\napple\npear\n","expected":"apple\npear\n"}
+{"id":"broad-sum","split":"broad","family":"sum","source":"3\n10\n","expected":"13\n"}
+{"id":"probe-words","split":"probe","family":"words","source":" PEAR \nApple\n","expected":"apple\npear\n"}
+{"id":"practice-words","split":"practice","family":"words","source":"Guava\n GUAVA \nFig\n","expected":"fig\nguava\n"}
+{"id":"test-words","split":"test","family":"words","source":" Mango \nMANGO\n fig \n","expected":"fig\nmango\n"}
+{"id":"test-sum","split":"test","family":"sum","source":"7  -19  5\n","expected":"-7\n"}

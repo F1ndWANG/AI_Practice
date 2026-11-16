@@ -48,3 +48,13 @@ BRS 将训练任务并行交给 Actor。整个波次使用同一初始记忆快�
 | BRS+DRS | 16/16 | 24 | 16 |
 
 `summary.json` 保存成功率、工具调用和失败类型。各阶段 JSONL 保留任务 ID、执行步骤、耗时、记忆命中和探针触发关系。这里的结果来自两个本地任务族，官方 OSWorld/ALE 结果由其独立运行器产生。
+
+## 自定义任务套件
+
+```bash
+python -m rsi_agent.study runs/my-agent-suite --suite examples/agent_suite.jsonl
+```
+
+[示例 JSONL](../examples/agent_suite.jsonl) 每行包含唯一 `id`、`split`、`family`、输入文本 `source` 和要逐字匹配的 `expected`。四个阶段分别为 `broad`、`probe`、`practice`、`test`。当前工具注册表支持文本清洗 `words` 和整数求和 `sum`。同一任务族的同一输入不可跨阶段重复，每个探针任务族至少提供一个练习。验证器持有预期文本，执行工具只能读取输入文本。
+
+输出中的 `brs-experience.sqlite` 保留广度探索后快照，`experience.sqlite` 保留深度练习后的状态。报告同时记录自定义套件哈希及留出任务分布。

@@ -74,3 +74,23 @@ python3 -m vlm_posttraining.compare runs/vlm-pairs/prepared/test.jsonl runs/vlm-
 训练每 10 步保存检查点，可用 `--save-steps` 调整。恢复时使用原阶段、参数和数据，传入 `--resume runs/vlm/sft/checkpoint-10`。输出的 `run.json` 包含清单哈希、初始 adapter 哈希、依赖版本和训练参数。
 
 对同一个 SFT adapter 和训练清单分别使用 `--evidence-weight 0` 和默认值 `0.5` 运行 GRPO，输出到不同目录。用同一验证集比较准确率、证据表现和格式，再用固定测试集报告最终对比。
+
+## 完整实验入口
+
+在支持 BF16 的 Linux CUDA 环境安装训练依赖后，准备带标注的原始 JSONL。以下命令完成清洗、SFT、GRPO、可选的证据奖励消融、验证集预测与统计对比。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m vlm_posttraining.experiment \
+  data/manifest.jsonl runs/vlm-experiment --ablate-evidence
+```
+
+中断后用相同配置增加 `--resume`。训练阶段自动查找最近一份包含 adapter、优化器、调度器及随机数状态的检查点。预测或统计阶段中断后重跑该阶段。完成阶段会验证产物哈希并复用输出。配置、原始清单或已登记的输入图发生变化时，应创建新运行目录。
+
+确认验证集设置后，使用同一配置生成留出测试报告。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m vlm_posttraining.experiment \
+  data/manifest.jsonl runs/vlm-experiment --ablate-evidence --resume --evaluate-test
+```
+
+`experiment.json` 是运行配置，`status.json` 保存阶段状态和哈希，`logs/` 保存训练及推理子进程输出。比较结果位于 `comparison-validation/` 和 `comparison-test/`。此编排入口面向单 GPU，多 GPU 训练可以按上文使用独立阶段命令配置。

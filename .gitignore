@@ -2,3 +2,6 @@ __pycache__/
 .venv/
 *.sqlite*
 runs/
+build/
+dist/
+*.egg-info/
