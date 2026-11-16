@@ -115,6 +115,13 @@ def gate_lines(summary):
         f"结果  {'通过' if summary['passed'] else '失败'}", "",
         *table(columns, [metric_cells(metric, check) for metric, check in summary["checks"].items()]), "",
     ]
+    if summary.get("policy"):
+        lines.extend([f"验收策略 SHA-256  `{summary['policy']['sha256']}`", ""])
+    coverage = summary.get("required_slice_checks", [])
+    if coverage:
+        rows = [(item["dimension"], item["value"], item["metric"],
+                 "缺少分组" if item["status"] == "missing" else states[item["status"]]) for item in coverage]
+        lines.extend(["### 必需分组", "", *table(("维度", "分组", "指标", "判定"), rows), ""])
     for dimension, report in summary.get("by_slice", {}).items():
         rows = [(group["value"] if group["value"] is not None else "未标注", *metric_cells(metric, check))
                 for group in report["slices"] for metric, check in group["checks"].items()]

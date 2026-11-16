@@ -31,7 +31,7 @@ jobs:
       - name: Check paired regression thresholds
         shell: bash
         run: |
-          python -m ai_practice.gates agent runs/ci/agent runs/ci/agent runs/ci-agent-gate --max-regressions 0 --slice-by task
+          python -m ai_practice.gates agent runs/ci/agent runs/ci/agent runs/ci-agent-gate --policy examples/policies/agent.json
           python -m ai_practice.gates vision runs/ci/fixtures/prepared/test.jsonl \
             runs/ci/fixtures/fixture-repeated_answer.jsonl runs/ci/fixtures/fixture-oracle.jsonl \
-            runs/ci-vision-gate --max-grounded-drop 0 --max-regressions 0 --slice-by task
+            runs/ci-vision-gate --policy examples/policies/vision.json

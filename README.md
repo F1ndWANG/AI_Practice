@@ -87,3 +87,16 @@ ai-practice report runs/vision-gate
 在现有验收命令加 `--slice-by task --min-slice-samples 5`，可按任务类型逐组验收。VLM 还支持分别追加 `--slice-by difficulty` 和 `--slice-by dataset`。每个维度独立分组，使用与总体检查相同的阈值。样本量门槛按指标有效分母判断。低于门槛或无标签的检查会在报告中注明，如果指定的维度完全没有有效检查，验收失败。只有总体和所有指定维度均通过时，命令才返回 0。
 
 `summary.json` 保存各组分母、前后指标和判定。`changes.jsonl` 在启用分组时附带变化样本的分组标签，便于复核。
+
+### 固定验收策略
+
+```bash
+python -m ai_practice.gates agent runs/acceptance/agent runs/acceptance/agent runs/agent-policy \
+  --policy examples/policies/agent.json
+python -m ai_practice.gates vision runs/acceptance/fixtures/prepared/test.jsonl \
+  runs/acceptance/fixtures/fixture-repeated_answer.jsonl \
+  runs/acceptance/fixtures/fixture-oracle.jsonl runs/vision-policy \
+  --policy examples/policies/vision.json
+```
+
+JSON 策略固定阈值、分组维度及最小有效样本数。`required_slices` 可为指定分组列出必须通过的指标。分组缺失、有效分母不足或指标退化时，必需检查失败。验收报告记录策略内容和 SHA-256。使用策略时，阈值和分组选项由策略提供，基线与候选仍由命令指定。仓库的两个示例覆盖内置 CPU 样例，可按实际实验数据调整覆盖要求。

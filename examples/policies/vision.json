@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "domain": "vision",
+  "settings": {
+    "max_accuracy_drop": 0,
+    "max_format_drop": 0,
+    "max_grounded_drop": 0,
+    "max_regressions": 0,
+    "slice_by": ["task"],
+    "min_slice_samples": 2,
+    "required_slices": {
+      "task": {
+        "ocr": ["answer_accuracy", "grounded_accuracy"],
+        "docvqa": ["answer_accuracy", "grounded_accuracy"],
+        "visual_reasoning": ["answer_accuracy", "grounded_accuracy"]
+      }
+    }
+  }
+}

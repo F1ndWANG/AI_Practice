@@ -1,6 +1,7 @@
 """Evaluate paired experiment regressions against explicit release thresholds."""
 
 import argparse
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -108,19 +109,39 @@ def evaluate_slices(base, candidate, metrics, dimensions, minimum, max_regressio
     return dimensions_report
 
 
-def evaluate_gate(base, candidate, metrics, max_regressions, slice_by, min_slice_samples):
+def required_checks(slices, required, metrics):
+    results = []
+    for dimension, groups in required.items():
+        if dimension not in slices:
+            raise ValueError(f"Required dimension {dimension} must appear in slice_by")
+        found = {group["value"]: group for group in slices[dimension]["slices"]}
+        for label, names in groups.items():
+            for metric in names:
+                if metric not in metrics:
+                    raise ValueError(f"Required slice metric {metric} is not configured")
+                match = found.get(label)
+                status = match["checks"][metric]["status"] if match else "missing"
+                results.append({"dimension": dimension, "value": label, "metric": metric,
+                                "status": status, "passed": status == "passed"})
+    return results
+
+
+def evaluate_gate(base, candidate, metrics, max_regressions, slice_by, min_slice_samples,
+                  required_slices=None):
     report, details = evaluate_pairs(base, candidate, metrics, max_regressions=max_regressions)
-    if not slice_by:
+    if not slice_by and not required_slices:
         return report, details
     slices = evaluate_slices(base, candidate, metrics, slice_by, min_slice_samples, max_regressions)
+    coverage = required_checks(slices, required_slices or {}, metrics)
     by_id = indexed(base)
     changes = [
         {**row, "slices": {key: by_id[row["id"]].get(key) for key in slice_by}}
         for row in details
     ]
     return {**report, "overall_passed": report["passed"], "min_slice_samples": min_slice_samples,
-            "passed": report["passed"] and all(item["passed"] for item in slices.values()),
-            "by_slice": slices}, changes
+            "passed": (report["passed"] and all(item["passed"] for item in slices.values())
+                       and all(item["passed"] for item in coverage)),
+            "by_slice": slices, "required_slice_checks": coverage}, changes
 
 
 def save(output, report, details):
@@ -146,7 +167,7 @@ def agent_inputs(run, variant):
 
 def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidate="brs_drs",
                max_success_drop=0.0, max_call_increase=0.0, max_regressions=None,
-               slice_by=(), min_slice_samples=1):
+               slice_by=(), min_slice_samples=1, required_slices=None, policy=None):
     old, left_digest, left = agent_inputs(base_run, baseline)
     new, right_digest, right = agent_inputs(candidate_run, candidate)
     if left_digest != right_digest or old["test_budget_per_task"] != new["test_budget_per_task"]:
@@ -165,9 +186,9 @@ def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidat
     report, details = evaluate_gate(*traces, {
         "task_success": (lambda row: int(row["success"]), max_success_drop),
         "tool_calls": (lambda row: row["tool_calls"], max_call_increase),
-    }, max_regressions, slice_by, min_slice_samples)
+    }, max_regressions, slice_by, min_slice_samples, required_slices)
     return save(output, {"kind": "regression_gate", "domain": "Agent",
-                         "task_snapshot_sha256": left_digest, "budget": budget,
+                         "task_snapshot_sha256": left_digest, "budget": budget, "policy": policy,
                          "baseline": {"variant": baseline, "trace_sha256": sha256(left)},
                          "candidate": {"variant": candidate, "trace_sha256": sha256(right)},
                          **report}, details)
@@ -175,7 +196,7 @@ def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidat
 
 def gate_vision(manifest, base, candidate, output, *, max_accuracy_drop=0.0,
                 max_format_drop=0.0, max_grounded_drop=None, max_regressions=None,
-                slice_by=(), min_slice_samples=1):
+                slice_by=(), min_slice_samples=1, required_slices=None, policy=None):
     metrics = {
         "answer_accuracy": (lambda row: row["accuracy"], max_accuracy_drop),
         "format_acceptance": (lambda row: row["format"], max_format_drop),
@@ -186,10 +207,68 @@ def gate_vision(manifest, base, candidate, output, *, max_accuracy_drop=0.0,
             max_grounded_drop,
         )
     report, details = evaluate_gate(score_predictions(manifest, base), score_predictions(manifest, candidate),
-                                    metrics, max_regressions, slice_by, min_slice_samples)
+                                    metrics, max_regressions, slice_by, min_slice_samples, required_slices)
     return save(output, {"kind": "regression_gate", "domain": "VLM",
-                         "manifest_sha256": sha256(manifest), "baseline_sha256": sha256(base),
+                         "manifest_sha256": sha256(manifest), "baseline_sha256": sha256(base), "policy": policy,
                          "candidate_sha256": sha256(candidate), **report}, details)
+
+
+POLICY_FIELDS = {
+    "agent": {"max_success_drop", "max_call_increase"},
+    "vision": {"max_accuracy_drop", "max_format_drop", "max_grounded_drop"},
+}
+POLICY_COMMON = {"max_regressions", "slice_by", "min_slice_samples", "required_slices"}
+
+
+def unique_mapping(pairs):
+    mapping = {}
+    for key, value in pairs:
+        if key in mapping:
+            raise ValueError(f"Repeated JSON key: {key}")
+        mapping[key] = value
+    return mapping
+
+
+def load_policy(path, domain):
+    raw = path.read_bytes()
+    mapping = json.loads(raw, object_pairs_hook=unique_mapping)
+    if (not isinstance(mapping, dict) or set(mapping) != {"schema", "domain", "settings"}
+            or type(mapping["schema"]) is not int or mapping["schema"] != 1 or mapping["domain"] != domain
+            or not isinstance(mapping["settings"], dict)):
+        raise ValueError(f"Expected a schema 1 policy for {domain}")
+    settings = mapping["settings"]
+    unexpected = set(settings) - POLICY_FIELDS[domain] - POLICY_COMMON
+    if unexpected:
+        raise ValueError(f"Unknown policy settings: {', '.join(sorted(unexpected))}")
+    for name in POLICY_FIELDS[domain] & settings.keys():
+        value = settings[name]
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"Invalid policy threshold: {name}")
+    for name, lower in (("max_regressions", 0), ("min_slice_samples", 1)):
+        if name in settings and (type(settings[name]) is not int or settings[name] < lower):
+            raise ValueError(f"Invalid policy setting: {name}")
+    allowed = {"task"} if domain == "agent" else {"task", "dataset", "difficulty"}
+    dimensions = settings.get("slice_by", [])
+    if (not isinstance(dimensions, list) or any(type(key) is not str or key not in allowed for key in dimensions)
+            or len(set(dimensions)) != len(dimensions)):
+        raise ValueError("Invalid policy slice_by")
+    required = settings.get("required_slices", {})
+    if not isinstance(required, dict) or not required.keys() <= set(dimensions):
+        raise ValueError("Required slice dimensions must appear in slice_by")
+    expected_metrics = {"task_success", "tool_calls"} if domain == "agent" else {
+        "answer_accuracy", "format_acceptance"
+    }
+    if "max_grounded_drop" in settings:
+        expected_metrics.add("grounded_accuracy")
+    for groups in required.values():
+        if not isinstance(groups, dict) or not groups:
+            raise ValueError("Required slice groups must be a nonempty mapping")
+        for label, metrics in groups.items():
+            if (not label.strip() or not isinstance(metrics, list) or not metrics
+                    or any(not isinstance(name, str) or name not in expected_metrics for name in metrics)
+                    or len(set(metrics)) != len(metrics)):
+                raise ValueError(f"Invalid required slice {label!r}")
+    return {**settings, "policy": {"sha256": hashlib.sha256(raw).hexdigest(), **mapping}}
 
 
 def main():
@@ -201,28 +280,33 @@ def main():
     agent.add_argument("output", type=Path)
     agent.add_argument("--baseline", choices=AGENT_VARIANTS, default="baseline")
     agent.add_argument("--candidate", choices=AGENT_VARIANTS, default="brs_drs")
-    agent.add_argument("--max-success-drop", type=float, default=0.0)
-    agent.add_argument("--max-call-increase", type=float, default=0.0)
+    agent.add_argument("--max-success-drop", type=float, default=argparse.SUPPRESS)
+    agent.add_argument("--max-call-increase", type=float, default=argparse.SUPPRESS)
     vision = commands.add_parser("vision")
     vision.add_argument("manifest", type=Path)
     vision.add_argument("base", type=Path)
     vision.add_argument("candidate", type=Path)
     vision.add_argument("output", type=Path)
-    vision.add_argument("--max-accuracy-drop", type=float, default=0.0)
-    vision.add_argument("--max-format-drop", type=float, default=0.0)
-    vision.add_argument("--max-grounded-drop", type=float)
-    agent.add_argument("--slice-by", choices=["task"], action="append", default=[])
-    vision.add_argument("--slice-by", choices=["task", "difficulty", "dataset"], action="append", default=[])
+    vision.add_argument("--max-accuracy-drop", type=float, default=argparse.SUPPRESS)
+    vision.add_argument("--max-format-drop", type=float, default=argparse.SUPPRESS)
+    vision.add_argument("--max-grounded-drop", type=float, default=argparse.SUPPRESS)
+    agent.add_argument("--slice-by", choices=["task"], action="append", default=argparse.SUPPRESS)
+    vision.add_argument("--slice-by", choices=["task", "difficulty", "dataset"], action="append", default=argparse.SUPPRESS)
     for command in (agent, vision):
-        command.add_argument("--max-regressions", type=int)
-        command.add_argument("--min-slice-samples", type=int, default=1)
-    args = parser.parse_args()
-    if args.max_regressions is not None and args.max_regressions < 0:
-        parser.error("--max-regressions must be nonnegative")
-    if args.min_slice_samples < 1 or len(set(args.slice_by)) != len(args.slice_by):
-        parser.error("Slice minimum must be positive and dimensions distinct")
-    options = vars(args)
-    action = gate_agent if options.pop("domain") == "agent" else gate_vision
+        command.add_argument("--max-regressions", type=int, default=argparse.SUPPRESS)
+        command.add_argument("--min-slice-samples", type=int, default=argparse.SUPPRESS)
+        command.add_argument("--policy", type=Path)
+    options = vars(parser.parse_args())
+    domain = options.pop("domain")
+    path = options.pop("policy")
+    if path:
+        if options.keys() & (POLICY_FIELDS[domain] | POLICY_COMMON):
+            parser.error("--policy cannot be combined with inline threshold or slice flags")
+        try:
+            options.update(load_policy(path, domain))
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+    action = gate_agent if domain == "agent" else gate_vision
     report = action(**options)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     raise SystemExit(0 if report["passed"] else 1)

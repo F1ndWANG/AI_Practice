@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "domain": "agent",
+  "settings": {
+    "max_success_drop": 0,
+    "max_call_increase": 0,
+    "max_regressions": 0,
+    "slice_by": ["task"],
+    "min_slice_samples": 2,
+    "required_slices": {
+      "task": {
+        "words": ["task_success", "tool_calls"],
+        "sum": ["task_success", "tool_calls"]
+      }
+    }
+  }
+}
