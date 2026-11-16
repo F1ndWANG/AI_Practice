@@ -145,42 +145,56 @@ def execute(task, recipe):
         return output.is_file() and output.read_text(encoding="utf-8") == task.expected, calls
 
 
+def run_task(task, recalled, strategy, budget, model=None):
+    good = [recipe for recipe, wins, losses in recalled if wins > losses]
+    bad = {recipe for recipe, wins, losses in recalled if losses >= wins}
+    candidates = list(POLICIES[task.family])
+    if strategy == "drs":
+        candidates.sort(key=len, reverse=True)
+    candidates = list(dict.fromkeys(good + [recipe for recipe in candidates if recipe not in bad]
+                                    + [recipe for recipe in candidates if recipe in bad]))
+    attempts = []
+    planner_errors = []
+    spent = 0
+    while spent < budget:
+        proposed = None
+        if model:
+            try:
+                proposed = model_recipe(task, attempts, recalled, model)
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+                planner_errors.append(type(error).__name__)
+        tried = {tuple(item["recipe"]) for item in attempts}
+        choices = [proposed] + candidates
+        recipe = next((item for item in choices if item and item not in tried
+                       and len(item) <= budget - spent), None)
+        if recipe is None:
+            break
+        success, calls = execute(task, recipe)
+        spent += len(calls)
+        tool_failed = any(call.get("error") or call.get("returncode") for call in calls)
+        failure = None if success else "tool_error" if tool_failed else "output_mismatch"
+        attempts.append({"recipe": recipe, "success": success, "calls": calls,
+                         "memory_hit": recipe in good, "failure": failure})
+        if success:
+            break
+    return {"task": task.family, "success": bool(attempts and attempts[-1]["success"]),
+            "tool_calls": spent, "planner_errors": planner_errors, "attempts": attempts}
+
+
+def consolidate(memory, results):
+    for row in results:
+        for attempt in row["attempts"]:
+            memory.update(row["task"], attempt["recipe"], attempt["success"])
+
+
 def run(split, memory, strategy, budget, model=None):
     results = []
     for task in curriculum(split):
         recalled = memory.recall(task.family) if memory else []
-        good = [recipe for recipe, wins, losses in recalled if wins > losses]
-        bad = {recipe for recipe, wins, losses in recalled if losses >= wins}
-        candidates = list(POLICIES[task.family])
-        if strategy == "drs":
-            candidates.sort(key=len, reverse=True)
-        candidates = list(dict.fromkeys(good + candidates))
-        attempts = []
-        planner_errors = []
-        spent = 0
-        for _ in range(len(candidates)):
-            proposed = None
-            if model:
-                try:
-                    proposed = model_recipe(task, attempts, recalled, model)
-                except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
-                    planner_errors.append(type(error).__name__)
-            tried = {tuple(item["recipe"]) for item in attempts}
-            choices = [proposed] + candidates
-            recipe = next((item for item in choices if item and item not in tried
-                           and item not in bad and len(item) <= budget - spent), None)
-            if recipe is None:
-                break
-            success, calls = execute(task, recipe)
-            spent += len(calls)
-            attempts.append({"recipe": recipe, "success": success, "calls": calls,
-                             "memory_hit": recipe in good})
-            if memory:
-                memory.update(task.family, recipe, success)
-            if success:
-                break
-        results.append({"task": task.family, "success": bool(attempts and attempts[-1]["success"]),
-                        "tool_calls": spent, "planner_errors": planner_errors, "attempts": attempts})
+        row = run_task(task, recalled, strategy, budget, model)
+        results.append(row)
+        if memory:
+            consolidate(memory, [row])
     return {"split": split, "strategy": strategy,
             "success_rate": sum(row["success"] for row in results) / len(results),
             "tool_calls": sum(row["tool_calls"] for row in results), "tasks": results}

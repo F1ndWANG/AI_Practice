@@ -1,0 +1,124 @@
+"""Compare model predictions on one manifest with paired group-bootstrap intervals."""
+
+import argparse
+import hashlib
+import json
+import random
+from collections import defaultdict
+from pathlib import Path
+
+from .pipeline import metrics, normalize, score_predictions, write_jsonl
+
+
+def grounded_correct(row):
+    return bool(row["accuracy"] and row["evidence"] == 1.0)
+
+
+def paired_delta(base, candidate, rounds, seed):
+    groups = defaultdict(list)
+    improved = regressed = 0
+    for left, right in zip(base, candidate):
+        change = int(grounded_correct(right)) - int(grounded_correct(left))
+        groups[left.get("split_group", left["source_group"])].append(change)
+        improved += change == 1
+        regressed += change == -1
+    group_totals = [(sum(items), len(items)) for items in groups.values()]
+    interval = None
+    if len(group_totals) > 1:
+        rng = random.Random(seed)
+        bootstrap = []
+        for _ in range(rounds):
+            draw = rng.choices(group_totals, k=len(group_totals))
+            bootstrap.append(sum(total for total, _ in draw) / sum(size for _, size in draw))
+        bootstrap.sort()
+        interval = [bootstrap[int(q * (rounds - 1))] for q in (0.025, 0.975)]
+    return {"delta_grounded_accuracy": (improved - regressed) / len(base),
+            "bootstrap_95": interval, "groups": len(groups),
+            "improved": improved, "regressed": regressed}
+
+
+def pair_metrics(rows):
+    pairs = defaultdict(list)
+    for row in rows:
+        if row.get("pair_id"):
+            pairs[row["pair_id"]].append(row)
+    if not pairs:
+        return None
+    for key, pair in pairs.items():
+        if (len(pair) != 2 or pair[0]["question"] != pair[1]["question"]
+                or normalize(pair[0]["answer"]) == normalize(pair[1]["answer"])
+                or pair[0].get("split_group", pair[0]["source_group"])
+                != pair[1].get("split_group", pair[1]["source_group"])
+                or pair[0].get("image_sha256", pair[0]["image"])
+                == pair[1].get("image_sha256", pair[1]["image"])):
+            raise ValueError(f"Invalid counterfactual pair: {key}")
+    return {
+        "pairs": len(pairs),
+        "both_answers_correct": sum(all(row["accuracy"] for row in pair)
+                                    for pair in pairs.values()) / len(pairs),
+        "both_grounded_correct": sum(all(map(grounded_correct, pair))
+                                     for pair in pairs.values()) / len(pairs),
+    }
+
+
+def compare(manifest, predictions, output, rounds=1000, seed=42):
+    if len(predictions) < 2 or rounds < 1:
+        raise ValueError("Comparison requires at least two variants and a positive resample count")
+    runs = {name: score_predictions(manifest, path) for name, path in predictions.items()}
+    baseline = next(iter(runs))
+    reference = runs[baseline]
+    paired = {}
+    reviews = []
+    for name, rows in runs.items():
+        if name == baseline:
+            continue
+        paired[name] = paired_delta(reference, rows, rounds, seed)
+        for left, right in zip(reference, rows):
+            if not left["errors"] and not right["errors"]:
+                continue
+            reviews.append({
+                **{key: left[key] for key in ("id", "image", "question", "answer", "evidence",
+                                              "task", "difficulty")},
+                "baseline": baseline, "candidate": name,
+                "baseline_completion": left["completion"], "candidate_completion": right["completion"],
+                "baseline_errors": left["errors"], "candidate_errors": right["errors"],
+                "grounded_change": int(grounded_correct(right)) - int(grounded_correct(left)),
+            })
+    variants = {}
+    for name, rows in runs.items():
+        slices = defaultdict(list)
+        for row in rows:
+            slices[f"{row['task']}/{row['difficulty']}"].append(row)
+        variants[name] = {"overall": metrics(rows),
+                          "counterfactual": pair_metrics(rows),
+                          "grounded_accuracy": sum(map(grounded_correct, rows)) / len(rows),
+                          "by_task_difficulty": {key: metrics(items) for key, items in sorted(slices.items())}}
+    report = {"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+              "baseline": baseline, "bootstrap_rounds": rounds, "seed": seed,
+              "variants": variants, "paired": paired}
+    output.mkdir(parents=True, exist_ok=False)
+    write_jsonl(output / "review.jsonl", reviews)
+    (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--prediction", action="append", required=True, metavar="NAME=PATH",
+                        help="Repeat for each variant, with the baseline first")
+    parser.add_argument("--rounds", type=int, default=1000)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    predictions = {}
+    for item in args.prediction:
+        name, separator, path = item.partition("=")
+        if not separator or not name or not path or name in predictions:
+            parser.error("each prediction must have a distinct NAME=PATH")
+        predictions[name] = Path(path)
+    print(json.dumps(compare(args.manifest, predictions, args.output, args.rounds, args.seed), indent=2))
+
+
+if __name__ == "__main__":
+    main()

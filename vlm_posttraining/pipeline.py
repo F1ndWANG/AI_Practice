@@ -72,8 +72,9 @@ def prepare(source, output, seed):
             image_hashes[image] = hashlib.sha256(content).hexdigest()
         digest = image_hashes[image]
         source_key = ("source", entry["source_group"])
-        image_key = ("image", digest)
-        parents[root(image_key)] = root(source_key)
+        image_key = ("visual", digest)
+        image_root, source_root = root(image_key), root(source_key)
+        parents[max(image_root, source_root)] = min(image_root, source_root)
         key = (digest, normalize(entry["question"]))
         signature = (normalize(entry["answer"]), frozenset(evidence_set(evidence)))
         duplicate = key in seen_samples
@@ -81,7 +82,7 @@ def prepare(source, output, seed):
             raise ValueError(f"Conflicting annotation for {entry['id']}")
         duplicate_count += int(duplicate)
         seen_samples[key] = signature
-        rows.append((source_key, duplicate, {**entry, "image": str(image)}))
+        rows.append((source_key, duplicate, {**entry, "image": str(image), "image_sha256": digest}))
 
     explicit = {}
     for key, _, row in rows:
@@ -98,7 +99,7 @@ def prepare(source, output, seed):
         random_value = int(hashlib.sha256(f"{seed}:{group}".encode()).hexdigest()[:8], 16)
         bucket = random_value % 100
         split = explicit.get(group, "train" if bucket < 80 else "validation" if bucket < 90 else "test")
-        by_split[split].append({**row, "split": split})
+        by_split[split].append({**row, "split": split, "split_group": group[1]})
     if not all(by_split.values()):
         raise ValueError("Every split needs data. Assign explicit splits or add independent source groups.")
     summary = {"input": len(rows), "duplicates_removed": duplicate_count, "splits": {}}
@@ -138,19 +139,23 @@ def score(completion, answer, evidence):
             "errors": errors}
 
 
-def evaluate(manifest, predictions, review):
+def score_predictions(manifest, predictions):
     references = list(read_jsonl(manifest))
     by_id = {}
     for row in read_jsonl(predictions):
         if row["id"] in by_id:
             raise ValueError(f"Duplicate prediction: {row['id']}")
         by_id[row["id"]] = row["completion"]
-    if not references or set(by_id) != {row["id"] for row in references}:
+    ids = {row["id"] for row in references}
+    if not references or len(ids) != len(references) or set(by_id) != ids:
         raise ValueError("Predictions must match the nonempty manifest exactly")
-    scored = [
+    return [
         {**row, "completion": by_id[row["id"]], **score(by_id[row["id"]], row["answer"], row["evidence"])}
         for row in references
     ]
+
+def evaluate(manifest, predictions, review):
+    scored = score_predictions(manifest, predictions)
     write_jsonl(review, (row for row in scored if row["errors"]))
     task_slices = {task: [row for row in scored if row["task"] == task]
                    for task in sorted({row["task"] for row in scored})}

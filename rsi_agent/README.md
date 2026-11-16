@@ -32,3 +32,19 @@ python -m rsi_agent.benchmark runs/upstream-rsi ale -- --help
 ```
 
 当前验证覆盖本地机制对照，OSWorld 与 ALE 的官方结果需在对应 VM 中单独生成。
+
+## BRS 与 DRS 阶段消融
+
+```bash
+python3 -m rsi_agent.study runs/rsi-study --seed 42 --per-family 8 --budget 6
+```
+
+BRS 将训练任务并行交给 Actor。整个波次使用同一初始记忆快照，波次结束后按输入顺序合并经验。DRS 使用独立的压力探针，记录失败并从该任务族选择练习。此处的探针、练习与最终测试使用各自的随机序列。无记忆、BRS、BRS+DRS 三组使用同一批留出任务和同一测试预算，后两组只读加载对应阶段的数据库。
+
+| 本地设置（种子 42） | 成功任务 | 测试工具调用 | 额外探索工具调用 |
+| --- | ---: | ---: | ---: |
+| 无记忆 | 16/16 | 56 | 0 |
+| BRS | 16/16 | 32 | 10 |
+| BRS+DRS | 16/16 | 24 | 16 |
+
+`summary.json` 保存成功率、工具调用和失败类型。各阶段 JSONL 保留任务 ID、执行步骤、耗时、记忆命中和探针触发关系。这里的结果来自两个本地任务族，官方 OSWorld/ALE 结果由其独立运行器产生。

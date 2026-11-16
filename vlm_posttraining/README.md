@@ -53,3 +53,24 @@ done
 输出包括答案准确率、格式合规率、证据 F1、可解析输出中的未标注证据率，以及逐任务错例统计。人工复核时对照原图与 `review.jsonl`，区分标注遗漏、等价表达和视觉幻觉。简历中的 2000 余条样本与历史实验指标需要原始数据、权重和人工复核记录才能复现。
 
 参考 [TRL SFT](https://huggingface.co/docs/trl/v0.29.0/en/sft_trainer) 和 [TRL GRPO](https://huggingface.co/docs/trl/v0.29.0/en/grpo_trainer)。
+
+## 反事实样例与成对模型对比
+
+```bash
+python3 -m vlm_posttraining.fixtures runs/vlm-pairs
+python3 -m vlm_posttraining.compare runs/vlm-pairs/prepared/test.jsonl runs/vlm-pair-report \
+  --prediction repeated=runs/vlm-pairs/fixture-repeated_answer.jsonl \
+  --prediction oracle=runs/vlm-pairs/fixture-oracle.jsonl
+```
+
+生成器提供 72 张图片及 36 对标签，覆盖 OCR、DocVQA 和视觉问答。同一对保留问题、改变图像中的答案，使用相同来源组及 `pair_id`，整对进入同一 split。附带的预测用于核验评测逻辑，训练后可将 base、SFT、GRPO 的预测按顺序传给同一入口。
+
+- `summary.json` 记录清单哈希、任务与难度切片、答案和证据均完全匹配的比率，以及反事实双样本都答对的比率。
+- `paired` 给出相对首个预测的同样本改进、退化数量和按来源连通组重采样的 95% bootstrap 区间。只有一个组时区间为空。样本组很少时区间仅用于描述。
+- `review.jsonl` 保存原图路径、标注、两组输出和错例类型，便于逐条核验。
+
+## 训练恢复与证据奖励消融
+
+训练每 10 步保存检查点，可用 `--save-steps` 调整。恢复时使用原阶段、参数和数据，传入 `--resume runs/vlm/sft/checkpoint-10`。输出的 `run.json` 包含清单哈希、初始 adapter 哈希、依赖版本和训练参数。
+
+对同一个 SFT adapter 和训练清单分别使用 `--evidence-weight 0` 和默认值 `0.5` 运行 GRPO，输出到不同目录。用同一验证集比较准确率、证据表现和格式，再用固定测试集报告最终对比。

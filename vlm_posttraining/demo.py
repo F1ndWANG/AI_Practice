@@ -21,6 +21,9 @@ def png(path, foreground, offset):
         for y in range(height)
     )
 
+    write_png(path, width, height, pixels)
+
+def write_png(path, width, height, pixels):
     def chunk(kind, data):
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data)))
