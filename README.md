@@ -63,3 +63,5 @@ ai-practice report runs/acceptance > runs/acceptance-report.md
 实验诊断入口包括 [Agent 调用预算对照](rsi_agent/README.md#调用预算对照)和 [GRPO 训练前奖励审计](vlm_posttraining/README.md#grpo-训练前奖励审计)，均可生成 Markdown 报告。
 
 [GRPO 模型候选采集](vlm_posttraining/README.md#从模型采集候选并审计)可与训练前审计直接串联。Agent 的[错误记忆压力测试](rsi_agent/README.md#错误记忆压力测试)报告成功率与重验开销。
+
+长时间运行见 [Agent 模型端点故障恢复](rsi_agent/README.md#模型端点故障恢复)和[候选采集中断恢复](vlm_posttraining/README.md#候选采集中断恢复)。

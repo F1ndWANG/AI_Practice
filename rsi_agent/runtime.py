@@ -11,6 +11,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -105,7 +106,45 @@ class Memory:
             )
 
 
-def model_recipe(task, attempts, recalled, model):
+def retry_delay(error):
+    if isinstance(error, HTTPError):
+        if error.code not in {408, 429, 500, 502, 503, 504}:
+            return None
+        delay = error.headers.get("Retry-After") if error.headers else None
+        if delay:
+            # Large or date-based server delays are left to the caller's fallback.
+            delay = delay.strip()
+            if len(delay) <= 6 and delay.isascii() and delay.isdecimal() and int(delay) <= 2:
+                return float(delay)
+            return None
+        return 0.25
+    reason = error.reason if isinstance(error, URLError) else error
+    return 0.25 if isinstance(reason, (TimeoutError, ConnectionError)) else None
+
+
+def read_planner_reply(request, transport):
+    for attempt in range(2):
+        started = time.monotonic()
+        row = {"attempt": attempt + 1}
+        transport.append(row)
+        try:
+            with urlopen(request, timeout=20) as response:
+                return json.load(response)
+        except (OSError, ValueError) as error:
+            row["error"] = type(error).__name__
+            if isinstance(error, HTTPError):
+                row["status"] = error.code
+                error.close()
+            delay = retry_delay(error) if attempt == 0 else None
+            if delay is None:
+                raise
+            row["retry_after_seconds"] = delay
+        finally:
+            row["seconds"] = time.monotonic() - started
+        time.sleep(delay)
+
+
+def model_recipe(task, attempts, recalled, model, transport=None):
     base = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     payload = {
         "model": model,
@@ -124,8 +163,7 @@ def model_recipe(task, attempts, recalled, model):
         headers={"Authorization": "Bearer " + os.environ.get("OPENAI_API_KEY", ""),
                  "Content-Type": "application/json"},
     )
-    with urlopen(request, timeout=20) as response:
-        reply = json.load(response)
+    reply = read_planner_reply(request, transport if transport is not None else [])
     if not isinstance(reply, dict):
         return None, None
     usage = reply.get("usage")
@@ -187,8 +225,9 @@ def run_task(task, recalled, strategy, budget, model=None):
             started = time.monotonic()
             tokens = None
             error_name = None
+            transport = []
             try:
-                proposed, tokens = model_recipe(task, attempts, recalled, model)
+                proposed, tokens = model_recipe(task, attempts, recalled, model, transport)
                 if proposed is None:
                     error_name = "InvalidRecipe"
             except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
@@ -196,7 +235,7 @@ def run_task(task, recalled, strategy, budget, model=None):
             if error_name:
                 planner_errors.append(error_name)
             planner_calls.append({"seconds": time.monotonic() - started, "tokens": tokens,
-                                  "error": error_name})
+                                  "error": error_name, "transport": transport})
         tried = {tuple(item["recipe"]) for item in attempts}
         choices = [proposed] + candidates
         recipe = next((item for item in choices if item and item not in tried

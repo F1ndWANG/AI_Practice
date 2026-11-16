@@ -1,11 +1,11 @@
 """Collect candidate groups from a label-free inference manifest for reward auditing."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 from ai_practice.artifacts import sha256, write_json
 
@@ -42,41 +42,84 @@ def read_inputs(dispatch, limit):
     return fingerprint(rows), selected
 
 
+def load_group(path, item, count):
+    record = json.loads(path.read_text(encoding="utf-8"))
+    row = record["row"]
+    if (record["sha256"] != fingerprint(row) or row["id"] != item["id"]
+            or len(row["completions"]) != count or len(row["generation"]) != count):
+        raise ValueError(f"Saved candidate group does not match the run: {path.name}")
+    return row
+
+
 def collect(dispatch, output, *, model_id=DEFAULT_MODEL, adapter=None, device="cuda", count=4,
-            seed=42, temperature=0.7, top_p=0.9, max_new_tokens=192, limit=None):
-    if output.exists():
-        raise FileExistsError(f"Output already exists: {output}")
+            seed=42, temperature=0.7, top_p=0.9, max_new_tokens=192, limit=None, resume=False):
     if count < 2 or max_new_tokens < 1 or not math.isfinite(temperature) or temperature <= 0 or not 0 < top_p <= 1:
         raise ValueError("Require ≥2 candidates, positive temperature/token budget, and top-p in (0, 1]")
+    if output.exists() and not resume:
+        raise FileExistsError(f"Output already exists: {output}")
     dispatch_digest, selected = read_inputs(dispatch, limit)
     adapter_weights = adapter / "adapter_model.safetensors" if adapter else None
     adapter_digest = sha256(adapter_weights) if adapter_weights else None
-    visual = VisualModel(model_id, adapter, device)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=output.parent) as directory:
-        staged = Path(directory) / "candidates"
-        staged.mkdir()
+    spec = {"schema": 1, "dispatch_sha256": dispatch_digest, "groups": len(selected),
+            "count": count, "seed": seed, "temperature": temperature,
+            "top_p": top_p, "max_new_tokens": max_new_tokens, "model": model_id,
+            "adapter": str(adapter.resolve()) if adapter else None, "adapter_sha256": adapter_digest,
+            "device": device}
+    if output.exists():
+        metadata = json.loads((output / "sampling.json").read_text(encoding="utf-8"))
+        if any(metadata.get(key) != value for key, value in spec.items()):
+            raise ValueError("Sampling configuration changed")
+        if sha256(output / "candidates.jsonl") != metadata["candidates_sha256"]:
+            raise ValueError("Completed candidate file changed")
+        return metadata
+
+    staged = output.with_name(f".{output.name}.partial")
+    staged.mkdir(parents=True, exist_ok=resume)
+    with (staged / ".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Another process is sampling into this run") from error
+        if output.exists():
+            raise FileExistsError(f"Run completed in another process: {output}")
+        settings = staged / "settings.json"
+        if settings.exists():
+            if json.loads(settings.read_text(encoding="utf-8")) != spec:
+                raise ValueError("Sampling configuration changed")
+        else:
+            write_json(settings, spec)
+        checkpoints = staged / "groups"
+        checkpoints.mkdir(exist_ok=True)
+
         def samples():
-            for item in selected:
+            visual = None
+            for index, item in enumerate(selected):
+                path = checkpoints / f"{index:08d}.json"
+                if path.exists():
+                    yield load_group(path, item, count)
+                    continue
+                if visual is None:
+                    visual = VisualModel(model_id, adapter, device)
                 key = json.dumps([seed, item["id"]], ensure_ascii=False)
                 group_seed = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big")
                 generated = visual.sample(item, count=count, seed=group_seed, temperature=temperature,
                                           top_p=top_p, max_new_tokens=max_new_tokens)
                 if len(generated) != count:
                     raise RuntimeError(f"Model returned an incomplete candidate group for {item['id']}")
-                yield {"id": item["id"], "completions": [row["completion"] for row in generated],
-                       "generation": [{key: row[key] for key in ("generation_seconds", "generated_tokens")}
-                                      for row in generated]}
+                row = {"id": item["id"], "completions": [entry["completion"] for entry in generated],
+                       "generation": [{metric: entry[metric] for metric in
+                                       ("generation_seconds", "generated_tokens")} for entry in generated]}
+                write_json(path, {"row": row, "sha256": fingerprint(row)})
+                yield row
+
         target = staged / "candidates.jsonl"
         write_jsonl(target, samples())
         if adapter_weights and sha256(adapter_weights) != adapter_digest:
             raise RuntimeError("Adapter weights changed during candidate collection")
-        metadata = {"schema": 1, "dispatch_sha256": dispatch_digest, "candidates_sha256": sha256(target),
-                    "groups": len(selected), "count": count, "seed": seed, "temperature": temperature,
-                    "top_p": top_p, "max_new_tokens": max_new_tokens, "model": model_id,
-                    "adapter": str(adapter) if adapter else None, "adapter_sha256": adapter_digest,
-                    "device": device}
+        metadata = {**spec, "candidates_sha256": sha256(target)}
         write_json(staged / "sampling.json", metadata)
+        if output.exists():
+            raise FileExistsError(f"Output already exists: {output}")
         staged.rename(output)
     return metadata
 
@@ -94,10 +137,11 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     result = collect(args.dispatch, args.output, model_id=args.model, adapter=args.adapter, device=args.device,
                      count=args.count, seed=args.seed, temperature=args.temperature, top_p=args.top_p,
-                     max_new_tokens=args.max_new_tokens, limit=args.limit)
+                     max_new_tokens=args.max_new_tokens, limit=args.limit, resume=args.resume)
     print(json.dumps(result, indent=2))
 
 

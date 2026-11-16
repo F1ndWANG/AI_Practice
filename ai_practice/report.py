@@ -25,6 +25,9 @@ def agent_lines(summary):
                      requests, value.get("model_fallbacks", 0), value.get("model_request_errors", 0),
                      value.get("model_tokens_reported") if value.get("model_tokens_reported") is not None else "—",
                      coverage))
+    http = [(name, value["model_http_requests"], value["model_http_retries"], value["model_http_errors"])
+            for name, value in summary["variants"].items() if "model_http_requests" in value]
+    transport = (table(("设置", "HTTP 尝试", "额外重试", "HTTP 尝试失败"), http) + [""] if http else [])
     families = [
         (family, variant, value["tasks"], percent(value["success_rate"]), value["tool_calls"])
         for family, variants in summary.get("families", {}).items()
@@ -38,6 +41,7 @@ def agent_lines(summary):
                 "已报告 Tokens", "用量覆盖"), rows), "",
         f"探索工具调用（BRS / DRS）  {summary['exploration_tool_calls']['brs']} / "
         f"{summary['exploration_tool_calls']['drs']}", "",
+        *transport,
         *breakdown,
     ]
 

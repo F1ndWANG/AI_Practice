@@ -191,3 +191,14 @@ python -m vlm_posttraining.reward_audit runs/vlm/prepared/validation.jsonl runs/
 ```
 
 采集端只接收盲测清单，核对图片哈希后复用单图推理的图像预处理。每个问题按全局种子和样本 ID 派生采样种子，候选组保存生成耗时和 token 数。采集产物绑定盲测清单、采样参数、候选文件和本地 adapter 哈希。评分端可校验候选及清单是否匹配。指定 `--limit` 时采集清单前 N 条。跨设备或依赖版本的生成结果可能有差异。
+
+## 候选采集中断恢复
+
+模型采集按问题落盘。从上次中断处继续时，使用相同命令并添加 `--resume`：
+
+```bash
+python -m vlm_posttraining.sample_candidates runs/dispatch/validation.jsonl runs/vlm-pilot \
+  --adapter runs/vlm/sft --count 4 --temperature 0.7 --top-p 0.9 --limit 64 --resume
+```
+
+续跑核对盲测清单、图像、采样配置、本地 adapter 和已有候选组哈希。完整候选组会复用，中断中的候选组会使用该题原种子重新生成。采集期间使用同目录下的隐藏 `.vlm-pilot.partial` 检查点，整批完成后发布目标目录。完成目录再次使用 `--resume` 时只复核产物。评分端入口仍读取最终的 `candidates.jsonl` 和 `sampling.json`。

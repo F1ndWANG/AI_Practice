@@ -128,7 +128,15 @@ def deep_practice(memory, probes, practice, budget, model=None):
 def summarize(rows):
     planner = [call for row in rows for call in row["planner_calls"]]
     tokens = [call["tokens"] for call in planner if call["tokens"] is not None]
+    if any("transport" in call for call in planner):
+        requests = [request for call in planner for request in call.get("transport", [])]
+        transport = {"model_http_requests": len(requests),
+                     "model_http_retries": sum(request["attempt"] > 1 for request in requests),
+                     "model_http_errors": sum(bool(request.get("error")) for request in requests)}
+    else:
+        transport = {}
     return {
+        **transport,
         "model_requests": len(planner),
         "model_tokens_reported": sum(tokens) if tokens else None,
         "model_requests_with_usage": len(tokens),
