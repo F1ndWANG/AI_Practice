@@ -187,6 +187,10 @@ def score(completion, answer, evidence, aliases=(), evidence_observed=True):
             "evidence": evidence_f1 if evidence_observed else None, "errors": errors}
 
 
+def reward_value(scored, evidence_weight):
+    return scored["accuracy"] + 0.2 * scored["format"] + evidence_weight * (scored["evidence"] or 0.0)
+
+
 def score_predictions(manifest, predictions):
     references = list(read_jsonl(manifest))
     by_id = {}

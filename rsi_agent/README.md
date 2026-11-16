@@ -97,3 +97,15 @@ python -m rsi_agent.replay runs/rsi-audit
 ```
 
 运行目录包含带预期输出的 `tasks.jsonl` 快照，须和轨迹一起保存在评测端。重放仅执行注册表中的工具，在独立临时目录按原轨迹重做每次尝试，核验预算、执行结果、失败分类和汇总。再根据探索轨迹重新统计配方成功与失败次数，对照两份只读 SQLite 快照。重放沿用已选配方，模型请求、延迟和 Token 记录沿用原始轨迹。此前未生成任务快照的运行需要重跑 study。
+
+## 调用预算对照
+
+```bash
+python -m rsi_agent.study runs/rsi-cost --extended
+python -m rsi_agent.budgets runs/rsi-cost runs/rsi-budgets --budgets 1 2 3 4 6
+python -m ai_practice report runs/rsi-budgets
+```
+
+重复执行同一批留出任务，三个设置使用相同的单任务预算。BRS 和 BRS+DRS 从原实验只读加载记忆，每档预算都重新执行本地工具。输出保留逐样本轨迹、成功率、测试调用和扣除原探索开销后的净节省。
+
+当有记忆设置取得正成功率、成功率达到无记忆基线且有测试调用节省时，报告按「探索调用数 ÷ 每任务平均节省调用数」向上取整估算回本任务数。结果假设后续任务具有近似的调用节省，适合对照本地任务设计。

@@ -8,7 +8,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from .inference import DEFAULT_MODEL, VisualModel
-from .pipeline import messages, read_jsonl, score, write_jsonl
+from .pipeline import messages, read_jsonl, reward_value, score, write_jsonl
 
 
 def multimodal_dataset(path, stage):
@@ -44,7 +44,7 @@ def reward(completions, answer, evidence, *, evidence_weight=0.5,
         if isinstance(completion, list):
             completion = completion[0]["content"] if completion else ""
         result = score(completion, expected_answer, expected_evidence, options, annotated)
-        rewards.append(result["accuracy"] + 0.2 * result["format"] + evidence_weight * (result["evidence"] or 0.0))
+        rewards.append(reward_value(result, evidence_weight))
     return rewards
 
 

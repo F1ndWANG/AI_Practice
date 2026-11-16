@@ -57,6 +57,32 @@ def matrix_lines(summary):
     ]
 
 
+def budget_lines(summary):
+    rows = []
+    for budget, variants in summary["budgets"].items():
+        for name, result in variants.items():
+            estimate = result["estimated_break_even_tasks"]
+            rows.append((budget, name, percent(result["success_rate"]), result["tool_calls"],
+                         result["net_calls_saved"], "—" if estimate is None else estimate))
+    return [
+        "## RSIAgent 调用预算对照", "",
+        *table(("单任务预算", "设置", "成功率", "测试调用", "净节省调用", "估算回本任务数"), rows), "",
+    ]
+
+
+def reward_lines(summary):
+    overview = {"全部": summary["overall"], **summary["by_task_evidence"]}
+    rows = [(name, stats["groups"], stats["zero_signal_groups"], stats["zero_signal_without_evidence"],
+             stats["answer_preference_inversions"], stats["answer_preference_ties"],
+             stats["malformed_candidates"]) for name, stats in overview.items()]
+    return [
+        "## GRPO 奖励审计", "",
+        f"候选来源  {summary['candidate_source']}，证据权重  {summary['evidence_weight']}", "",
+        *table(("任务", "组数", "同分组", "无证据项同分组", "正确答案排序反转", "正确答案并列",
+                "格式错误候选"), rows), "",
+    ]
+
+
 def vision_lines(summary, name):
     rows = []
     performance = []
@@ -115,6 +141,10 @@ def render(root):
         lines.extend(agent_lines(read(linked_agent)))
     elif local_data and local_data.get("kind") == "agent_matrix":
         lines.extend(matrix_lines(local_data))
+    elif local_data and local_data.get("kind") == "agent_budget_sweep":
+        lines.extend(budget_lines(local_data))
+    elif local_data and local_data.get("kind") == "vlm_reward_audit":
+        lines.extend(reward_lines(local_data))
     elif local_data and "exploration_tool_calls" in local_data:
         lines.extend(agent_lines(local_data))
 

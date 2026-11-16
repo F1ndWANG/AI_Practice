@@ -163,3 +163,18 @@ python -m vlm_posttraining.pipeline evaluate runs/vlm/prepared/test.jsonl \
 ```
 
 只交付推理清单和图像给推理端。绑定文件应和带标注清单一起保存于可信评分端。校验核对清单、样本内容及图像文件。评测按 ID 对齐，并拒绝缺少、重复或额外的预测。
+
+## GRPO 训练前奖励审计
+
+```bash
+python -m vlm_posttraining.reward_audit runs/vlm/prepared/validation.jsonl runs/grpo-audit
+python -m ai_practice report runs/grpo-audit
+```
+
+默认对每个问题构造正确答案、错误答案、格式损坏和证据扰动候选。审计与训练共用相同的奖励函数。使用 `--candidates pilot.jsonl` 可审计模型输出。每行是一个问题的候选组：
+
+```json
+{"id":"sample-1","completions":["{\"answer\":\"12\",\"evidence\":[]}","{\"answer\":\"15\",\"evidence\":[]}"]}
+```
+
+候选可以覆盖参考清单的子集，每组至少两条输出。报告记录覆盖量，并对照证据奖励权重为零时的结果。组内所有候选同分时没有相对奖励差。若同组最低分的正确答案低于最高分的有效错误答案，则记录排序反转。通过 `--evidence-weight` 可以比较不同权重，并查看 `groups.jsonl` 中的候选级评分。合成扰动用于检验奖励逻辑，模型采样后的候选用于估计真实信号。
