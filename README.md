@@ -65,3 +65,19 @@ ai-practice report runs/acceptance > runs/acceptance-report.md
 [GRPO 模型候选采集](vlm_posttraining/README.md#从模型采集候选并审计)可与训练前审计直接串联。Agent 的[错误记忆压力测试](rsi_agent/README.md#错误记忆压力测试)报告成功率与重验开销。
 
 长时间运行见 [Agent 模型端点故障恢复](rsi_agent/README.md#模型端点故障恢复)和[候选采集中断恢复](vlm_posttraining/README.md#候选采集中断恢复)。
+
+## 回归验收
+
+```bash
+python -m ai_practice.gates agent runs/acceptance/agent runs/acceptance/agent runs/agent-gate \
+  --baseline baseline --candidate brs_drs --max-regressions 0
+python -m ai_practice.gates vision runs/acceptance/fixtures/prepared/test.jsonl \
+  runs/acceptance/fixtures/fixture-repeated_answer.jsonl \
+  runs/acceptance/fixtures/fixture-oracle.jsonl runs/vision-gate \
+  --max-grounded-drop 0 --max-regressions 0
+ai-practice report runs/vision-gate
+```
+
+两个入口按样本 ID 配对。Agent 还要求两份运行使用同一任务快照和工具预算。VLM 使用同一份参考清单重新评分。默认允许的平均退化为 0，`--max-regressions 0` 进一步禁止单样本质量退化，即使总体均值持平也会失败。Agent 的 `--max-call-increase` 使用每任务平均调用数。准确率阈值用 0 到 1 的比例，例如 `0.02` 表示两个百分点。严格证据准确率为可选指标，仅使用有证据标注的样本，若请求该检查但没有合适样本则判定失败。
+
+通过时返回 0，指标不达标时返回 1。两种结果均写入 `summary.json` 和 `changes.jsonl`。后者包含指标发生变化的样本 ID 及前后值。GitHub Actions 对内置 CPU 样例执行这两项检查。

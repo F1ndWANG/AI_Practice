@@ -99,6 +99,19 @@ def reward_lines(summary):
     ]
 
 
+def gate_lines(summary):
+    rows = []
+    for metric, check in summary["checks"].items():
+        show = (lambda value: "—" if value is None else f"{value:.2f}") if metric == "tool_calls" else percent
+        rows.append((metric, check["samples"], show(check["baseline"]), show(check["candidate"]),
+                     show(check["delta"]), check["regressed"], "通过" if check["passed"] else "失败"))
+    return [
+        f"## {summary['domain']} 回归验收", "",
+        f"结果  {'通过' if summary['passed'] else '失败'}", "",
+        *table(("指标", "样本", "基线", "候选", "差值", "退化样本", "判定"), rows), "",
+    ]
+
+
 def vision_lines(summary, name):
     rows = []
     performance = []
@@ -155,6 +168,8 @@ def render(root):
     local_data = read(local_summary) if local_summary.is_file() else None
     if linked_agent.is_file():
         lines.extend(agent_lines(read(linked_agent)))
+    elif local_data and local_data.get("kind") == "regression_gate":
+        lines.extend(gate_lines(local_data))
     elif local_data and local_data.get("kind") == "agent_matrix":
         lines.extend(matrix_lines(local_data))
     elif local_data and local_data.get("kind") == "agent_budget_sweep":
