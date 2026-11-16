@@ -42,12 +42,31 @@ def agent_lines(summary):
     ]
 
 
+def matrix_lines(summary):
+    rows = []
+    for name, result in summary["variants"].items():
+        saved = result["tool_calls_saved"]
+        net = result["tool_calls_saved_including_exploration"]
+        sd = saved["sample_sd"]
+        rows.append((name, percent(result["success_rate"]["mean"]), f"{saved['mean']:.1f}",
+                     "—" if sd is None else f"{sd:.1f}", f"{net['mean']:.1f}"))
+    return [
+        "## RSIAgent 跨种子对照", "",
+        "种子  " + ", ".join(map(str, summary["seeds"])), "",
+        *table(("设置", "平均成功率", "平均节省测试调用", "测试节省标准差", "扣除探索后平均节省"), rows), "",
+    ]
+
+
 def vision_lines(summary, name):
     rows = []
     performance = []
+    datasets = []
     for variant, result in summary["variants"].items():
         overall = result["overall"]
         pairs = result.get("counterfactual")
+        datasets.extend((variant, dataset, values["n"], percent(values["accuracy"]),
+                         percent(values["evidence"]))
+                        for dataset, values in result.get("by_dataset", {}).items())
         values = overall.get("generation_performance")
         if values:
             performance.append((variant, values["measured"], f"{values['p50_seconds']:.3f}",
@@ -77,6 +96,7 @@ def vision_lines(summary, name):
         *table(("设置", "样本数", "答案准确率", "格式合规率", "证据 F1", "严格证据准确率",
                 "双图全对率"), rows), "",
         *speed,
+        *(table(("设置", "数据源", "样本数", "答案准确率", "证据 F1"), datasets) + [""] if datasets else []),
         *answer_table,
         *table(("对比设置", "严格证据准确率变化", "95% bootstrap 区间", "改善", "退化", "来源组"), deltas),
         "", f"清单 SHA-256  `{summary['manifest_sha256']}`", "",
@@ -93,6 +113,8 @@ def render(root):
     local_data = read(local_summary) if local_summary.is_file() else None
     if linked_agent.is_file():
         lines.extend(agent_lines(read(linked_agent)))
+    elif local_data and local_data.get("kind") == "agent_matrix":
+        lines.extend(matrix_lines(local_data))
     elif local_data and "exploration_tool_calls" in local_data:
         lines.extend(agent_lines(local_data))
 
@@ -104,6 +126,15 @@ def render(root):
         metadata = root / path
         if metadata.is_file():
             lines.extend(vision_lines(read(metadata), title))
+    audit_path = root / "audit.json"
+    if audit_path.is_file():
+        audit = read(audit_path)
+        if audit.get("kind") == "multimodal_mix":
+            rows = [(split, dataset, count, stats["unannotated_evidence_by_dataset"].get(dataset, 0))
+                    for split, stats in audit["splits"].items()
+                    for dataset, count in stats["by_dataset"].items()]
+            lines.extend(["## 多数据源审计", "", f"删除精确重复样本 {audit['duplicates_removed']} 条", "",
+                          *table(("划分", "数据源", "保留样本", "缺少证据标注"), rows), ""])
     if local_data and "paired" in local_data:
         lines.extend(vision_lines(local_data, "多模态成对评测"))
     if len(lines) == 2:

@@ -75,6 +75,7 @@ def compare(manifest, predictions, output, rounds=1000, seed=42):
             reviews.append({
                 **{key: left[key] for key in ("id", "image", "question", "answer",
                                               "task", "difficulty")},
+                "dataset": left.get("dataset"),
                 "answer_aliases": left.get("answer_aliases", []),
                 "evidence": left["reference_evidence"],
                 "evidence_observed": left.get("evidence_observed", True),
@@ -87,12 +88,16 @@ def compare(manifest, predictions, output, rounds=1000, seed=42):
     variants = {}
     for name, rows in runs.items():
         slices = defaultdict(list)
+        datasets = defaultdict(list)
         for row in rows:
             slices[f"{row['task']}/{row['difficulty']}"].append(row)
+            if row.get("dataset"):
+                datasets[row["dataset"]].append(row)
         overall = metrics(rows)
         eligible = overall["evidence_annotated"]
         variants[name] = {"overall": overall, "counterfactual": pair_metrics(rows),
                           "grounded_accuracy": sum(map(grounded_correct, rows)) / eligible if eligible else None,
+                          "by_dataset": {key: metrics(items) for key, items in sorted(datasets.items())},
                           "by_task_difficulty": {key: metrics(items) for key, items in sorted(slices.items())}}
     report = {"manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
               "baseline": baseline, "bootstrap_rounds": rounds, "seed": seed,

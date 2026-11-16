@@ -10,7 +10,7 @@ from pathlib import Path
 from ai_practice.artifacts import artifact_index, sha256, verify_index, write_json
 
 from .compare import compare
-from .pipeline import prepare, read_jsonl
+from .pipeline import prepare, validate_images
 from .train import DEFAULT_MODEL
 
 
@@ -36,16 +36,6 @@ def launch(arguments, log):
         stream.write(json.dumps(command, ensure_ascii=False) + "\n")
         stream.flush()
         subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, check=True)
-
-
-def validate_images(prepared):
-    checked = set()
-    for split in ("train", "validation", "test"):
-        for row in read_jsonl(prepared / f"{split}.jsonl"):
-            pair = (row["image"], row["image_sha256"])
-            if pair not in checked and sha256(Path(pair[0])) != pair[1]:
-                raise ValueError(f"Image changed since preparation: {pair[0]}")
-            checked.add(pair)
 
 
 def execute(output, manifest, config, evaluate_test):

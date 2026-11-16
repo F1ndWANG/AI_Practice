@@ -131,3 +131,16 @@ python -m vlm_posttraining.inference document.png "What is the invoice total?" \
 ```
 
 单图复核与批量评测复用相同生成逻辑。默认使用 CUDA BF16，可指定 `--device cpu` 使用 FP32 推理。导出通过 PEFT 安全合并 LoRA，写入模型分片、处理器和 adapter 哈希。合并需准备容纳完整模型的内存和磁盘空间，也可用 `--dtype fp32` 导出。参考 [PEFT 模型存储说明](https://huggingface.co/docs/peft/developer_guides/checkpoint#model-storage)。
+
+## 合并多数据源
+
+```bash
+python -m vlm_posttraining.mix runs/data-mix \
+  --source docvqa=runs/docvqa.jsonl --source vision=data/vision.jsonl
+python -m vlm_posttraining.mix runs/data-mix --verify
+python -m ai_practice report runs/data-mix
+```
+
+样本 ID、来源组和反事实配对 ID 加入数据集前缀。相对图像路径按各自清单解析。显式划分会保留，与全局图像哈希或来源分组冲突时整次导入失败。完全重复且标注一致的样本保留按数据集名称排序遇到的第一条，审计记录各来源的保留量与去重数。跨来源泄漏检查覆盖相同文件内容。同一原始文档的不同裁图或重编码版本，可在各清单中标注相同的 `shared_source_group`，将它们锁定到同一划分。同一清单中同一来源组的所有样本须使用一致的共享标记。
+
+使用 `runs/data-mix/manifest.jsonl` 作为 GPU 实验入口的输入，实验继续按完整清单做一致性校验。若混合时指定了 `--seed`，实验应传入同一值。训练报告中的 `by_dataset` 提供分来源的答案与证据指标，避免总体平均值掩盖单个数据集退化。

@@ -79,3 +79,12 @@ python -m rsi_agent.study runs/rsi-extended --extended --per-family 8
 在文本清洗和整数求和之外，增加 `json` 与 `csv`。JSON 任务要求生成递归键排序的紧凑 JSON。CSV 任务要求按类别聚合整数金额，并生成排序后的制表符分隔文本。BRS 使用输入键已排序、类别字段不带引号的样本，探针、练习和留出样本加入无序键或带逗号的引号字段。自定义 JSONL 也支持这两个任务族。
 
 `summary.json` 中的 `families` 提供各任务族在无记忆、BRS、BRS+DRS 三组中的成功率、调用开销和失败类型。默认套件继续使用基础任务，便于比较既有实验。
+
+## 跨种子成本对照
+
+```bash
+python -m rsi_agent.matrix runs/rsi-matrix --seeds 42 43 44 --extended
+python -m ai_practice report runs/rsi-matrix
+```
+
+每个种子独立生成任务和记忆。三个设置使用同一批留出任务，保留原始轨迹和数据库。汇总给出成功率、同种子相对无记忆基线的差值，以及测试调用节省。净节省从测试调用节省中扣除该设置实际执行的探索调用。报告中的标准差描述种子间变化。

@@ -55,3 +55,5 @@ ai-practice report runs/acceptance > runs/acceptance-report.md
 | [RSIAgent 扩展任务集](rsi_agent/README.md#扩展任务集) | 增加 JSON 规范化与带引号 CSV 聚合，输出按任务族消融结果 |
 | [DocVQA 数据转换](vlm_posttraining/README.md#导入-docvqa) | 导入本地 Task 1 标注和图像，保留答案变体与文档分组 |
 | [单图复核与模型导出](vlm_posttraining/README.md#单图复核与模型导出) | 复查错例，或将 LoRA 合并为可独立加载的模型目录 |
+
+跨种子对照和多来源审计均可导出 Markdown 报告。参见 [Agent 实验矩阵](rsi_agent/README.md#跨种子成本对照)与[多模态数据合并](vlm_posttraining/README.md#合并多数据源)。

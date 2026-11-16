@@ -8,6 +8,8 @@ import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from ai_practice.artifacts import sha256
+
 
 def read_jsonl(path):
     with Path(path).open(encoding="utf-8") as stream:
@@ -22,6 +24,16 @@ def write_jsonl(path, rows):
     with path.open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def validate_images(prepared):
+    checked = set()
+    for split in ("train", "validation", "test"):
+        for row in read_jsonl(prepared / f"{split}.jsonl"):
+            pair = (row["image"], row["image_sha256"])
+            if pair not in checked and sha256(Path(pair[0])) != pair[1]:
+                raise ValueError(f"Image changed since preparation: {pair[0]}")
+            checked.add(pair)
 
 
 def normalize(text):
@@ -98,10 +110,9 @@ def prepare(source, output, seed):
             raise ValueError(f"Unknown split: {split}")
         image = (source.parent / entry["image"]).resolve()
         if image not in image_hashes:
-            content = image.read_bytes()
-            if not content:
+            if image.stat().st_size == 0:
                 raise ValueError(f"Empty image: {image}")
-            image_hashes[image] = hashlib.sha256(content).hexdigest()
+            image_hashes[image] = sha256(image)
         digest = image_hashes[image]
         source_key = ("source", entry["source_group"])
         image_key = ("visual", digest)
