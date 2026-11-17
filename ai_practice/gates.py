@@ -13,6 +13,27 @@ from vlm_posttraining.compare import grounded_correct
 from .artifacts import artifact_index, sha256, write_json
 
 
+def protocol_digest(value):
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def agent_baseline_digest(rows):
+    fields = ("id", "task", "success", "tool_calls")
+    return protocol_digest([{key: row[key] for key in fields}
+                            for row in sorted(rows, key=lambda item: item["id"])])
+
+
+def vision_reference_digest(manifest):
+    records = []
+    for row in read_jsonl(manifest):
+        record = {key: value for key, value in row.items() if key != "image"}
+        if record.get("image_sha256") is None:
+            record["image_sha256"] = sha256((manifest.parent / row["image"]).resolve())
+        records.append(record)
+    return protocol_digest(sorted(records, key=lambda item: item["id"]))
+
+
 def indexed(rows):
     result = {}
     for row in rows:
@@ -191,7 +212,8 @@ def gate_agent(base_run, candidate_run, output, *, baseline="baseline", candidat
     }, max_regressions, slice_by, min_slice_samples, required_slices)
     return save(output, {"kind": "regression_gate", "domain": "Agent",
                          "task_snapshot_sha256": left_digest, "budget": budget, "policy": policy,
-                         "baseline": {"variant": baseline, "trace_sha256": sha256(left)},
+                         "baseline": {"variant": baseline, "trace_sha256": sha256(left),
+                                      "outcomes_sha256": agent_baseline_digest(traces[0])},
                          "candidate": {"variant": candidate, "trace_sha256": sha256(right)},
                          **report}, details)
 
@@ -208,10 +230,16 @@ def gate_vision(manifest, base, candidate, output, *, max_accuracy_drop=0.0,
             lambda row: int(grounded_correct(row)) if row["evidence"] is not None else None,
             max_grounded_drop,
         )
-    report, details = evaluate_gate(score_predictions(manifest, base), score_predictions(manifest, candidate),
+    baseline_rows = score_predictions(manifest, base)
+    report, details = evaluate_gate(baseline_rows, score_predictions(manifest, candidate),
                                     metrics, max_regressions, slice_by, min_slice_samples, required_slices)
+    baseline_digest = protocol_digest([
+        {key: row[key] for key in ("id", "completion")}
+        for row in sorted(baseline_rows, key=lambda item: item["id"])
+    ])
     return save(output, {"kind": "regression_gate", "domain": "VLM",
-                         "manifest_sha256": sha256(manifest), "baseline_sha256": sha256(base), "policy": policy,
+                         "manifest_sha256": sha256(manifest), "reference_protocol_sha256": vision_reference_digest(manifest),
+                         "baseline_sha256": sha256(base), "baseline_completions_sha256": baseline_digest, "policy": policy,
                          "candidate_sha256": sha256(candidate), **report}, details)
 
 

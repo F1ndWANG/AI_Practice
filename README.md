@@ -111,3 +111,14 @@ python -m ai_practice.release verify runs/release
 验收包汇总两份回归判定，保存 Markdown 报告、两个判定摘要和文件哈希清单。可通过 `--revision` 标记完整提交 SHA。默认省略逐样本变化记录，只有显式指定 `--include-changes` 才将其打包。原始图像、预测、权重以及完整工具轨迹留在各自实验目录。
 
 生成前会校验两份验收输出的收据。即使某项指标失败，也会生成可校验的验收包，并返回退出码 1。旧版验收目录如果缺少 `receipt.json`，需要重新运行验收命令。GitHub Actions 为两个 Python 环境分别上传内置 CPU 样例的验收包，包含样例的逐条变化记录。
+
+### 跨提交对比
+
+```bash
+python -m ai_practice.compare_releases runs/release-before runs/release-after runs/release-diff \
+  --fail-on-regression
+```
+
+先校验两份交付验收包，再逐模型对比总体指标和可验收分组。要求策略、评测数据、基线以及指标分母一致。Agent 的基线对比使用逐任务结果与工具调用数，排除耗时字段。多模态对比使用参考标注、图像哈希与基线生成内容，排除文件路径和记录顺序。旧版验收包缺少上述指纹时回退到原始文件哈希，跨机器比较时可用新版重新生成旧侧验收包。
+
+命令输出 `summary.json` 和 `report.md`。任一项目不可比时退出码为 2，报告注明原因。加 `--fail-on-regression` 后，可比指标退化时退出码为 1，即使两份独立验收都通过。样本不足的分组可显示差值，但不会触发退化判定。
