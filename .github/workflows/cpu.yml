@@ -31,13 +31,14 @@ jobs:
       - name: Run both regression gates and verify bundle
         shell: bash
         run: |
-          python -m ai_practice.acceptance runs/ci-acceptance \
+          python -m ai_practice.acceptance_plan freeze runs/ci-plan.json \
             --agent-base runs/ci/agent --agent-candidate runs/ci/agent \
             --agent-policy examples/policies/agent.json \
             --vision-manifest runs/ci/fixtures/prepared/test.jsonl \
             --vision-base runs/ci/fixtures/fixture-repeated_answer.jsonl \
             --vision-candidate runs/ci/fixtures/fixture-oracle.jsonl \
             --vision-policy examples/policies/vision.json --revision "$GITHUB_SHA" --include-changes
+          python -m ai_practice.acceptance_plan run runs/ci-plan.json runs/ci-acceptance
       - name: Upload acceptance bundle
         if: always() && hashFiles('runs/ci-acceptance/bundle/receipt.json') != ''
         uses: actions/upload-artifact@v4

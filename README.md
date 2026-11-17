@@ -138,3 +138,14 @@ python -m ai_practice.acceptance runs/acceptance-run \
 命令分别执行两个验收，校验并生成 `bundle/`，并在 `status.json` 记录各阶段结果。提供 `--previous <已解压的旧验收包>` 会执行跨提交对比并生成 `comparison/`。需要保留逐样本变化记录到验收包时添加 `--include-changes`。
 
 退出码 0 表示所有启用的检查通过，1 表示指标未达标或跨提交指标退化，2 表示输入无法处理或两份结果不可比。一个项目输入有误时仍会尝试另一个项目，保留该项目生成的结果。两项都产生有效报告时，即使指标失败也会生成验收包。GitHub Actions 使用此入口。
+
+### 锁定验收输入并复跑
+
+将上一节命令改用 `python -m ai_practice.acceptance_plan freeze runs/release-plan.json`，保留相同的输入参数。随后运行：
+
+```bash
+python -m ai_practice.acceptance_plan verify runs/release-plan.json
+python -m ai_practice.acceptance_plan run runs/release-plan.json runs/release-replay
+```
+
+清单记录两侧 Agent 的摘要、任务与所选轨迹，以及多模态标注、预测、两份策略和可选的历史包收据。已准备好的标注清单带有图像哈希，评分直接使用这份记录。若标注清单缺少图像哈希，锁定时也会读取并记录相应图像的哈希。输入变更将阻止复跑。路径相对于清单所在目录，迁移时保留相对布局，输入中的其他绝对路径也需继续可用。验收状态及交付包摘要记录清单的 SHA-256。GitHub Actions 使用锁定清单运行内置 CPU 验收。

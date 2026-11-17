@@ -34,9 +34,11 @@ def copy_gate(source, destination, domain, include_changes):
     return result
 
 
-def build(agent, vision, output, *, revision=None, include_changes=False):
+def build(agent, vision, output, *, revision=None, include_changes=False, plan_sha256=None):
     if revision is not None and not re.fullmatch(r"[a-f0-9]{40}", revision):
         raise ValueError("revision must be a full lowercase Git SHA")
+    if plan_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", plan_sha256):
+        raise ValueError("Invalid acceptance plan SHA-256")
     if output.exists():
         raise FileExistsError(f"Output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -49,10 +51,14 @@ def build(agent, vision, output, *, revision=None, include_changes=False):
                   "passed": agent_report["passed"] and vision_report["passed"],
                   "gates": {"agent": agent_report["passed"], "vision": vision_report["passed"]},
                   "changes_included": include_changes}
+        if plan_sha256:
+            result["plan_sha256"] = plan_sha256
         write_json(staged / "summary.json", result)
         lines = ["# AI Practice 交付验收", "", f"结果  {'通过' if result['passed'] else '失败'}", ""]
         if revision:
             lines.extend([f"Git 提交  `{revision}`", ""])
+        if plan_sha256:
+            lines.extend([f"验收清单 SHA-256  `{plan_sha256}`", ""])
         lines.extend(gate_lines(agent_report))
         lines.extend(gate_lines(vision_report))
         (staged / "report.md").write_text("\n".join(lines), encoding="utf-8")
