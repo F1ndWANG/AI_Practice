@@ -222,3 +222,15 @@ python -m vlm_posttraining.shards merge runs/test-shards runs/test-merged.jsonl
 ```
 
 两个 worker 命令可以在不同终端同时运行。每个 worker 独立加载模型，按样本写检查点，重跑同一片只补未完成的样本。分片交错分配清单中的样本，结果合并时恢复原始顺序。合并核对每片的输入、样本 ID、产物哈希、模型标识、设备类型及 adapter 哈希。所有 worker 需要能访问清单中的图像路径和同一份基础权重。基础模型内容应由用户固定，因为合并校验的是模型标识。合并后的文件可直接用原始标注清单评分。
+
+### 单卡与多卡吞吐实验
+
+```bash
+python -m vlm_posttraining.shard_experiment run runs/dispatch/test.jsonl runs/single \
+  --gpus 0 --adapter runs/vlm/sft
+python -m vlm_posttraining.shard_experiment run runs/dispatch/test.jsonl runs/parallel \
+  --gpus 0,1 --adapter runs/vlm/sft
+python -m vlm_posttraining.shard_experiment compare runs/single runs/parallel
+```
+
+每张卡启动一个独立 worker，使用 `CUDA_VISIBLE_DEVICES` 指定设备。失败后用相同参数添加 `--resume`，已完成的分片会校验后复用。分片日志保存于 `worker-*.log`。计时从启动 worker 到合并完成，包含子进程加载模型，不包含运行前的数据校验和分片准备。对比要求两次都从空目录完整运行、采用相同模型与输入，续跑结果不会计入加速比。两轮实验应使用相同的硬件类型和运行环境。

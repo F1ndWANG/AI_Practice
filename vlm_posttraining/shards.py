@@ -80,27 +80,32 @@ def run_shard(root, index, model=DEFAULT_MODEL, adapter=None, device="cuda"):
     return result
 
 
+def completed_shard(root, plan, digest, index):
+    _, expected = planned_input(root, plan, index)
+    receipt = root / f"receipt-{index}.json"
+    predictions = root / f"predictions-{index}.jsonl"
+    if not receipt.is_file() or not predictions.is_file():
+        raise ValueError(f"Missing completed shard {index}")
+    completed = json.loads(receipt.read_text(encoding="utf-8"))
+    if (completed.get("schema") != 1 or completed.get("index") != index
+            or completed.get("plan_sha256") != digest or completed.get("samples") != len(expected)
+            or completed.get("predictions_sha256") != sha256(predictions)):
+        raise ValueError(f"Invalid receipt or predictions for shard {index}")
+    return completed, checked_predictions(predictions, expected)
+
+
 def merge(root, output):
     plan, digest = load_plan(root)
     count = len(plan["shard_sha256"])
     merged = {}
     settings = None
     for index in range(count):
-        _, expected = planned_input(root, plan, index)
-        receipt = root / f"receipt-{index}.json"
-        predictions = root / f"predictions-{index}.jsonl"
-        if not receipt.is_file() or not predictions.is_file():
-            raise ValueError(f"Missing completed shard {index}")
-        completed = json.loads(receipt.read_text(encoding="utf-8"))
-        if (completed.get("schema") != 1 or completed.get("index") != index
-                or completed.get("plan_sha256") != digest or completed.get("samples") != len(expected)
-                or completed.get("predictions_sha256") != sha256(predictions)):
-            raise ValueError(f"Invalid receipt or predictions for shard {index}")
+        completed, rows = completed_shard(root, plan, digest, index)
         if index == 0:
             settings = completed["model_settings"]
         if completed["model_settings"] != settings:
             raise ValueError(f"Model settings differ for shard {index}")
-        merged.update((row["id"], row) for row in checked_predictions(predictions, expected))
+        merged.update((row["id"], row) for row in rows)
     if output.exists():
         raise FileExistsError(output)
     output.parent.mkdir(parents=True, exist_ok=True)
