@@ -7,8 +7,9 @@ import math
 from importlib.metadata import version
 from pathlib import Path
 
-from .inference import DEFAULT_MODEL, VisualModel
-from .pipeline import messages, read_jsonl, reward_value, score, write_jsonl
+from .inference import DEFAULT_MODEL
+from .predict import predict
+from .pipeline import messages, read_jsonl, reward_value, score
 
 
 def multimodal_dataset(path, stage):
@@ -107,17 +108,6 @@ def train(args):
         processor.save_pretrained(str(args.output))
 
 
-def predict(args):
-    model = VisualModel(args.model, args.adapter)
-
-    def predictions():
-        for row in read_jsonl(args.manifest):
-            result = model.ask(row["image"], row["question"], row.get("evidence_observed", True))
-            yield {"id": row["id"], **result}
-
-    write_jsonl(args.output, predictions())
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=["sft", "grpo", "predict"])
@@ -132,6 +122,8 @@ def main():
     parser.add_argument("--evidence-weight", type=float, default=0.5)
     parser.add_argument("--save-steps", type=int, default=10)
     parser.add_argument("--resume", type=Path, help="Trainer checkpoint directory for this stage")
+    parser.add_argument("--resume-prediction", action="store_true")
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cuda", help="Prediction device")
     args = parser.parse_args()
     if args.steps < 1 or args.save_steps < 1:
         parser.error("steps and save-steps must be positive")
@@ -147,8 +139,10 @@ def main():
         parser.error("--adapter must contain adapter_model.safetensors")
     if args.stage == "sft" and args.adapter:
         parser.error("SFT starts from --model")
+    if args.stage != "predict" and (args.resume_prediction or args.device != "cuda"):
+        parser.error("--resume-prediction and --device apply only to prediction")
     if args.stage == "predict":
-        predict(args)
+        predict(args.manifest, args.output, args.model, args.adapter, args.device, args.resume_prediction)
     else:
         train(args)
 

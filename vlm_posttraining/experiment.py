@@ -107,7 +107,7 @@ def execute(output, manifest, config, evaluate_test):
         predictions = {}
         for name, adapter in adapters.items():
             pred = output / f"{split}-{name}.jsonl"
-            args = ["predict", dispatch, pred, *common]
+            args = ["predict", dispatch, pred, *common, "--resume-prediction"]
             if adapter:
                 args.extend(["--adapter", adapter])
             inputs = [dispatch] + (adapter_paths(adapter) if adapter else [])

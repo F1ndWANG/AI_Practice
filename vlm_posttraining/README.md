@@ -202,3 +202,12 @@ python -m vlm_posttraining.sample_candidates runs/dispatch/validation.jsonl runs
 ```
 
 续跑核对盲测清单、图像、采样配置、本地 adapter 和已有候选组哈希。完整候选组会复用，中断中的候选组会使用该题原种子重新生成。采集期间使用同目录下的隐藏 `.vlm-pilot.partial` 检查点，整批完成后发布目标目录。完成目录再次使用 `--resume` 时只复核产物。评分端入口仍读取最终的 `candidates.jsonl` 和 `sampling.json`。
+
+### 批量预测断点续跑
+
+```bash
+python -m vlm_posttraining.train predict runs/dispatch/test.jsonl runs/test-predictions.jsonl \
+  --adapter runs/vlm/sft --resume-prediction
+```
+
+批量预测可用 `--resume-prediction` 按样本写入隐藏 SQLite 检查点。使用同一命令续跑时，核对推理输入、图像、模型标识、设备和 adapter 权重及配置，只预测尚未完成的样本。所有结果齐备后，按输入顺序原子发布 JSONL。更换参数或输入时请使用新的输出路径。需要严格固定基础模型时，请指向内容固定的本地模型目录。批量预测可显式选择 `--device cpu`。完整实验入口默认启用按样本续跑。

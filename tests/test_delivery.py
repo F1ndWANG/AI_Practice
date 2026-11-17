@@ -52,6 +52,7 @@ class DeliveryTests(unittest.TestCase):
                 stage, input_path, destination, *flags = arguments
                 calls.append((stage, destination.name))
                 if stage == "predict":
+                    self.assertIn("--resume-prediction", flags)
                     self.assertTrue(all("answer" not in row and "evidence" not in row
                                         for row in read_jsonl(input_path)))
                     reference = output / "prepared" / input_path.name
