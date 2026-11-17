@@ -234,3 +234,13 @@ python -m vlm_posttraining.shard_experiment compare runs/single runs/parallel
 ```
 
 每张卡启动一个独立 worker，使用 `CUDA_VISIBLE_DEVICES` 指定设备。失败后用相同参数添加 `--resume`，已完成的分片会校验后复用。分片日志保存于 `worker-*.log`。计时从启动 worker 到合并完成，包含子进程加载模型，不包含运行前的数据校验和分片准备。对比要求两次都从空目录完整运行、采用相同模型与输入，续跑结果不会计入加速比。两轮实验应使用相同的硬件类型和运行环境。
+
+### 多配置重复实验
+
+```bash
+python -m vlm_posttraining.shard_matrix runs/dispatch/test.jsonl runs/scaling \
+  --group 0 --group 0,1 --group 0,1,2,3 --repeats 3 \
+  --adapter runs/vlm/sft --reference runs/vlm/prepared/test.jsonl
+```
+
+首个配置为单卡基线。每轮从新目录启动，各轮轮换配置顺序，避免同一配置始终第一个运行。对每个多卡配置使用同轮单卡结果计算加速比。报告给出吞吐、耗时、配对加速比和输出变化数的中位数及范围。提供 `--reference` 后会在推理计时结束后评分，报告答案准确率，详细的格式、证据和生成耗时统计保存于 `rounds.json`。单轮失败会保留日志并继续其他配置，可用配对数会单独记录。全部轮次均完整才返回成功。
