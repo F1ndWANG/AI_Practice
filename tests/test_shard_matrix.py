@@ -36,6 +36,10 @@ class ShardMatrixTests(unittest.TestCase):
                 output = root / "matrix"
                 result = execute(manifest, output, [["0"], ["0", "1"]], repeats=2,
                                  model="fixture", reference=reference)
+                pilot = output / "repeat-1/group-0/predictions.jsonl"
+                comparison = root / "strategies"
+                strategies = execute(manifest, comparison, [["0", "1"]], repeats=2,
+                                     model="fixture", reference=reference, profile=pilot)
             self.assertTrue(result["passed"])
             rounds = json.loads((output / "rounds.json").read_text())
             self.assertEqual([row["order"] for row in rounds], [[0, 1], [1, 0]])
@@ -44,7 +48,19 @@ class ShardMatrixTests(unittest.TestCase):
             self.assertEqual(parallel["changed_completions"]["median"], 0)
             self.assertEqual(parallel["answer_accuracy"]["median"], 0)
             self.assertIn("配对加速比", (output / "report.md").read_text())
-            self.assertEqual(visual.return_value.ask.call_count, 18 * 4)
+            self.assertEqual(visual.return_value.ask.call_count, 18 * 8)
+            self.assertTrue(strategies["passed"])
+            self.assertTrue(strategies["profile_sha256"])
+            strategy_rounds = json.loads((comparison / "rounds.json").read_text())
+            self.assertEqual([row["order"] for row in strategy_rounds], [[0, 1], [1, 0]])
+            baseline, candidate = strategies["groups"]
+            self.assertEqual(baseline["gpus"], candidate["gpus"])
+            self.assertEqual([baseline["strategy"], candidate["strategy"]], ["round_robin", "profile"])
+            self.assertEqual(candidate["paired_speedup"]["runs"], 2)
+            self.assertEqual(candidate["paired_slowest_worker_delta_seconds"]["median"], 0)
+            self.assertEqual(candidate["changed_completions"]["median"], 0)
+            sample = json.loads((comparison / "profile.jsonl").read_text().splitlines()[0])
+            self.assertEqual(set(sample), {"id", "generation_seconds"})
 
 
 if __name__ == "__main__":

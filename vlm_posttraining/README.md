@@ -257,4 +257,12 @@ python -m vlm_posttraining.shard_experiment compare runs/parallel runs/balanced
 
 `compare` 输出最慢 worker 的实测耗时、总吞吐加速比和生成内容变化数。`summary.json` 记录各 worker 的样本数量、运行耗时及均衡分片的估计生成耗时。按分片独立运行时，也可在 `shards prepare` 上使用同一个 `--profile` 参数。恢复均衡实验需传入相同耗时记录。
 
-正式测量可在同一组 GPU 上交替两种策略的运行次序，每次指定新的输出目录，并汇报各轮配对加速比。试跑开销单独记录。估计只使用试跑的生成耗时，实测 worker 耗时还包括加载模型、预处理和写盘。
+正式测量可用矩阵入口自动交替运行次序，固定同一组 GPU 和同一份试跑耗时。
+
+```bash
+python -m vlm_posttraining.shard_matrix runs/dispatch/test.jsonl runs/strategy-matrix \
+  --group 0,1 --profile runs/single/predictions.jsonl --repeats 4 \
+  --adapter runs/vlm/sft --reference runs/vlm/prepared/test.jsonl
+```
+
+每轮各跑一次轮询与均衡分片，四轮中各策略先跑两次。输出目录保存只含 ID 和耗时的 `profile.jsonl` 快照，`rounds.json` 保存逐轮数据及失败原因，`report.md` 汇报配对加速比、最慢 worker 耗时差值、生成内容变化数及可选的答案准确率。差值为均衡策略减轮询策略，负数表示均衡策略的最慢 worker 更快。试跑开销单独记录。估计使用试跑的生成耗时，实测 worker 耗时还包括加载模型、预处理和写盘。
