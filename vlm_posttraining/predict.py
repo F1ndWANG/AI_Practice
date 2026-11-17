@@ -54,6 +54,15 @@ def publish(output, rows):
             temporary.unlink(missing_ok=True)
 
 
+def adapter_files(adapter):
+    return [adapter / name for name in ("adapter_model.safetensors", "adapter_config.json")] if adapter else []
+
+
+def model_settings(model, adapter, device):
+    return {"model": model, "device": device,
+            "adapter_digests": {path.name: sha256(path) for path in adapter_files(adapter)}}
+
+
 def predict(manifest, output, model, adapter=None, device="cuda", resume=False):
     if output.resolve() == manifest.resolve():
         raise ValueError("Prediction manifest and output must be distinct")
@@ -64,10 +73,7 @@ def predict(manifest, output, model, adapter=None, device="cuda", resume=False):
         publish(output, (predict_row(visual, row) for row in rows))
         return
 
-    adapter_files = [adapter / name for name in ("adapter_model.safetensors", "adapter_config.json")] if adapter else []
-    adapter_digests = {path.name: sha256(path) for path in adapter_files}
-    spec = {"model": model, "adapter_digests": adapter_digests, "device": device,
-            "input_sha256": fingerprint(rows), "schema": 1}
+    spec = {**model_settings(model, adapter, device), "input_sha256": fingerprint(rows), "schema": 1}
     checkpoint = output.with_name(f".{output.name}.prediction.sqlite")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.with_name(f".{output.name}.lock").open("a") as lock:
@@ -76,7 +82,7 @@ def predict(manifest, output, model, adapter=None, device="cuda", resume=False):
         except BlockingIOError as error:
             raise RuntimeError("Another process is predicting into this output") from error
         with closing(sqlite3.connect(checkpoint)) as database:
-            cache_predictions(database, rows, spec, output, model, adapter, device, adapter_files)
+            cache_predictions(database, rows, spec, output, model, adapter, device, adapter_files(adapter))
 
 
 def predict_row(visual, row):

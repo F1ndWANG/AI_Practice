@@ -211,3 +211,14 @@ python -m vlm_posttraining.train predict runs/dispatch/test.jsonl runs/test-pred
 ```
 
 批量预测可用 `--resume-prediction` 按样本写入隐藏 SQLite 检查点。使用同一命令续跑时，核对推理输入、图像、模型标识、设备和 adapter 权重及配置，只预测尚未完成的样本。所有结果齐备后，按输入顺序原子发布 JSONL。更换参数或输入时请使用新的输出路径。需要严格固定基础模型时，请指向内容固定的本地模型目录。批量预测可显式选择 `--device cpu`。完整实验入口默认启用按样本续跑。
+
+### 多卡分片推理与验收
+
+```bash
+python -m vlm_posttraining.shards prepare runs/dispatch/test.jsonl runs/test-shards --shards 2
+CUDA_VISIBLE_DEVICES=0 python -m vlm_posttraining.shards run runs/test-shards 0 --adapter runs/vlm/sft
+CUDA_VISIBLE_DEVICES=1 python -m vlm_posttraining.shards run runs/test-shards 1 --adapter runs/vlm/sft
+python -m vlm_posttraining.shards merge runs/test-shards runs/test-merged.jsonl
+```
+
+两个 worker 命令可以在不同终端同时运行。每个 worker 独立加载模型，按样本写检查点，重跑同一片只补未完成的样本。分片交错分配清单中的样本，结果合并时恢复原始顺序。合并核对每片的输入、样本 ID、产物哈希、模型标识、设备类型及 adapter 哈希。所有 worker 需要能访问清单中的图像路径和同一份基础权重。基础模型内容应由用户固定，因为合并校验的是模型标识。合并后的文件可直接用原始标注清单评分。
