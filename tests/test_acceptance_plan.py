@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ai_practice.acceptance_plan import checked_options, freeze
+from ai_practice.acceptance_plan import checked_options
 from rsi_agent.study import study
 from vlm_posttraining.fixtures import generate
 
@@ -32,7 +32,12 @@ class AcceptancePlanTests(unittest.TestCase):
                 "include_changes": False, "revision": "f" * 40, "previous": None,
             }
             plan = source / "plan.json"
-            freeze(plan, options)
+            create = [sys.executable, "-m", "ai_practice.acceptance_plan", "freeze", str(plan)]
+            for name, value in options.items():
+                if value is not None and value is not False:
+                    create.extend([f"--{name.replace('_', '-')}", str(value)])
+            proc = subprocess.run(create, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
             relocated = root / "relocated"
             source.rename(relocated)
             plan = relocated / "plan.json"

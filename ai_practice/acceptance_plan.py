@@ -96,7 +96,7 @@ def main():
     args = parser.parse_args()
     try:
         if args.action == "freeze":
-            options = vars(args)
+            options = vars(args).copy()
             path = options.pop("plan")
             options.pop("action")
             result = freeze(path, options)
