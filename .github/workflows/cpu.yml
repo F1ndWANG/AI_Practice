@@ -28,22 +28,20 @@ jobs:
         run: |
           ai-practice smoke runs/ci
           ai-practice verify runs/ci
-      - name: Check paired regression thresholds
+      - name: Run both regression gates and verify bundle
         shell: bash
         run: |
-          status=0
-          python -m ai_practice.gates agent runs/ci/agent runs/ci/agent runs/ci-agent-gate --policy examples/policies/agent.json || status=1
-          python -m ai_practice.gates vision runs/ci/fixtures/prepared/test.jsonl \
-            runs/ci/fixtures/fixture-repeated_answer.jsonl runs/ci/fixtures/fixture-oracle.jsonl \
-            runs/ci-vision-gate --policy examples/policies/vision.json || status=1
-          python -m ai_practice.release build runs/ci-agent-gate runs/ci-vision-gate runs/ci-acceptance \
-            --revision "$GITHUB_SHA" --include-changes || status=1
-          python -m ai_practice.release verify runs/ci-acceptance || status=1
-          exit "$status"
+          python -m ai_practice.acceptance runs/ci-acceptance \
+            --agent-base runs/ci/agent --agent-candidate runs/ci/agent \
+            --agent-policy examples/policies/agent.json \
+            --vision-manifest runs/ci/fixtures/prepared/test.jsonl \
+            --vision-base runs/ci/fixtures/fixture-repeated_answer.jsonl \
+            --vision-candidate runs/ci/fixtures/fixture-oracle.jsonl \
+            --vision-policy examples/policies/vision.json --revision "$GITHUB_SHA" --include-changes
       - name: Upload acceptance bundle
-        if: always() && hashFiles('runs/ci-acceptance/receipt.json') != ''
+        if: always() && hashFiles('runs/ci-acceptance/bundle/receipt.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: acceptance-python-${{ matrix.python-version }}
-          path: runs/ci-acceptance/
+          path: runs/ci-acceptance/bundle/
           if-no-files-found: error

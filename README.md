@@ -122,3 +122,19 @@ python -m ai_practice.compare_releases runs/release-before runs/release-after ru
 先校验两份交付验收包，再逐模型对比总体指标和可验收分组。要求策略、评测数据、基线以及指标分母一致。Agent 的基线对比使用逐任务结果与工具调用数，排除耗时字段。多模态对比使用参考标注、图像哈希与基线生成内容，排除文件路径和记录顺序。旧版验收包缺少上述指纹时回退到原始文件哈希，跨机器比较时可用新版重新生成旧侧验收包。
 
 命令输出 `summary.json` 和 `report.md`。任一项目不可比时退出码为 2，报告注明原因。加 `--fail-on-regression` 后，可比指标退化时退出码为 1，即使两份独立验收都通过。样本不足的分组可显示差值，但不会触发退化判定。
+
+### 一次运行完整验收
+
+```bash
+python -m ai_practice.acceptance runs/acceptance-run \
+  --agent-base runs/acceptance/agent --agent-candidate runs/acceptance/agent \
+  --agent-policy examples/policies/agent.json \
+  --vision-manifest runs/acceptance/fixtures/prepared/test.jsonl \
+  --vision-base runs/acceptance/fixtures/fixture-repeated_answer.jsonl \
+  --vision-candidate runs/acceptance/fixtures/fixture-oracle.jsonl \
+  --vision-policy examples/policies/vision.json
+```
+
+命令分别执行两个验收，校验并生成 `bundle/`，并在 `status.json` 记录各阶段结果。提供 `--previous <已解压的旧验收包>` 会执行跨提交对比并生成 `comparison/`。需要保留逐样本变化记录到验收包时添加 `--include-changes`。
+
+退出码 0 表示所有启用的检查通过，1 表示指标未达标或跨提交指标退化，2 表示输入无法处理或两份结果不可比。一个项目输入有误时仍会尝试另一个项目，保留该项目生成的结果。两项都产生有效报告时，即使指标失败也会生成验收包。GitHub Actions 使用此入口。
