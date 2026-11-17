@@ -244,3 +244,17 @@ python -m vlm_posttraining.shard_matrix runs/dispatch/test.jsonl runs/scaling \
 ```
 
 首个配置为单卡基线。每轮从新目录启动，各轮轮换配置顺序，避免同一配置始终第一个运行。对每个多卡配置使用同轮单卡结果计算加速比。报告给出吞吐、耗时、配对加速比和输出变化数的中位数及范围。提供 `--reference` 后会在推理计时结束后评分，报告答案准确率，详细的格式、证据和生成耗时统计保存于 `rounds.json`。单轮失败会保留日志并继续其他配置，可用配对数会单独记录。全部轮次均完整才返回成功。
+
+### 同卡数对比两种分片策略
+
+使用前面单卡试跑的 `predictions.jsonl` 作为耗时记录。均衡策略按样本生成耗时降序分配，每次将样本交给累计估计耗时最少的 worker。运行器要求记录覆盖全部输入 ID，每个 ID 只能出现一次，且耗时必须为有限正数。
+
+```bash
+python -m vlm_posttraining.shard_experiment run runs/dispatch/test.jsonl runs/balanced \
+  --gpus 0,1 --adapter runs/vlm/sft --profile runs/single/predictions.jsonl
+python -m vlm_posttraining.shard_experiment compare runs/parallel runs/balanced
+```
+
+`compare` 输出最慢 worker 的实测耗时、总吞吐加速比和生成内容变化数。`summary.json` 记录各 worker 的样本数量、运行耗时及均衡分片的估计生成耗时。按分片独立运行时，也可在 `shards prepare` 上使用同一个 `--profile` 参数。恢复均衡实验需传入相同耗时记录。
+
+正式测量可在同一组 GPU 上交替两种策略的运行次序，每次指定新的输出目录，并汇报各轮配对加速比。试跑开销单独记录。估计只使用试跑的生成耗时，实测 worker 耗时还包括加载模型、预处理和写盘。

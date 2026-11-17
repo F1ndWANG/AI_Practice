@@ -1,7 +1,10 @@
 """Split blind inference across workers and merge verified predictions."""
 
 import argparse
+import heapq
 import json
+import math
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,7 +16,38 @@ from .pipeline import read_jsonl, write_jsonl
 from .predict import model_settings, prediction_inputs, predict, publish
 
 
-def prepare(manifest, output, count):
+def profile_weights(profile, sample_ids):
+    weights = {}
+    for row in read_jsonl(profile):
+        if not isinstance(row, dict):
+            raise ValueError("Profile rows must be JSON objects")
+        key, seconds = row.get("id"), row.get("generation_seconds")
+        if (not isinstance(key, str) or key in weights or type(seconds) not in (int, float)
+                or not 0 < seconds <= sys.float_info.max):
+            raise ValueError("Profile requires unique IDs and finite positive generation_seconds")
+        weights[key] = seconds
+    if weights.keys() != set(sample_ids) or not math.isfinite(sum(weights.values(), 0.0)):
+        raise ValueError("Profile must cover exactly the input IDs with a finite total duration")
+    return weights
+
+
+def balanced_assignments(sample_ids, weights, count):
+    assignments = [[] for _ in range(count)]
+    loads = [(0.0, index) for index in range(count)]
+    for key in sorted(sample_ids, key=weights.__getitem__, reverse=True):
+        load, index = loads[0]
+        assignments[index].append(key)
+        heapq.heapreplace(loads, (load + weights[key], index))
+    return assignments
+
+
+def shard_ids(plan, index):
+    if "assignments" in plan:
+        return plan["assignments"][index]
+    return plan["sample_ids"][index::len(plan["shard_sha256"])]
+
+
+def prepare(manifest, output, count, *, weights=None):
     if output.exists():
         raise FileExistsError(output)
     rows = prediction_inputs(manifest)
@@ -21,13 +55,22 @@ def prepare(manifest, output, count):
         raise ValueError("Shard count must be between one and the number of samples")
     result = {"schema": 1, "input_sha256": fingerprint(rows),
               "sample_ids": [row["id"] for row in rows], "shard_sha256": []}
+    if weights is not None:
+        if weights.keys() != set(result["sample_ids"]):
+            raise ValueError("Profile must cover exactly the input IDs")
+        result["assignments"] = balanced_assignments(result["sample_ids"], weights, count)
+        result["profile_sha256"] = fingerprint(weights)
+        rows_by_id = {row["id"]: row for row in rows}
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as directory:
         staged = Path(directory) / "shards"
         staged.mkdir()
         for index in range(count):
             path = staged / f"input-{index}.jsonl"
-            write_jsonl(path, rows[index::count])
+            shard_rows = rows[index::count]
+            if weights is not None:
+                shard_rows = (rows_by_id[key] for key in result["assignments"][index])
+            write_jsonl(path, shard_rows)
             result["shard_sha256"].append(sha256(path))
         write_json(staged / "plan.json", result)
         staged.rename(output)
@@ -42,12 +85,22 @@ def load_plan(root):
             or len(plan["shard_sha256"]) > len(plan["sample_ids"])
             or len(set(plan["sample_ids"])) != len(plan["sample_ids"])):
         raise ValueError("Invalid shard plan")
+    if "assignments" in plan:
+        assignments = plan["assignments"]
+        if (not isinstance(assignments, list) or len(assignments) != len(plan["shard_sha256"])
+                or any(not isinstance(group, list) or not group for group in assignments)):
+            raise ValueError("Invalid shard assignments")
+        assigned = [key for group in assignments for key in group]
+        if (any(not isinstance(key, str) for key in assigned)
+                or len(assigned) != len(plan["sample_ids"])
+                or set(assigned) != set(plan["sample_ids"])):
+            raise ValueError("Shard assignments must partition the input IDs")
     return plan, fingerprint(plan)
 
 
 def planned_input(root, plan, index):
     path = root / f"input-{index}.jsonl"
-    expected = plan["sample_ids"][index::len(plan["shard_sha256"])]
+    expected = shard_ids(plan, index)
     if sha256(path) != plan["shard_sha256"][index]:
         raise ValueError(f"Shard {index} input changed")
     if [row["id"] for row in read_jsonl(path)] != expected:
@@ -120,6 +173,7 @@ def main():
     split.add_argument("manifest", type=Path)
     split.add_argument("root", type=Path)
     split.add_argument("--shards", type=int, required=True)
+    split.add_argument("--profile", type=Path, help="Pilot predictions JSONL")
     run = sub.add_parser("run")
     run.add_argument("root", type=Path)
     run.add_argument("index", type=int)
@@ -131,7 +185,9 @@ def main():
     join.add_argument("output", type=Path)
     args = parser.parse_args()
     if args.command == "prepare":
-        result = prepare(args.manifest, args.root, args.shards)
+        weights = (profile_weights(args.profile, (row["id"] for row in prediction_inputs(args.manifest)))
+                   if args.profile else None)
+        result = prepare(args.manifest, args.root, args.shards, weights=weights)
     elif args.command == "run":
         result = run_shard(args.root, args.index, args.model, args.adapter, args.device)
     else:
