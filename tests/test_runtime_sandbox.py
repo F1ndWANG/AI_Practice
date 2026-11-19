@@ -15,7 +15,7 @@ from rsi_agent.sandbox_worker import isolate
                      "Requires Linux with Bubblewrap installed")
 class SandboxTests(unittest.TestCase):
     def test_real_tool_execution_and_readonly_host_filesystem(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             root = Path(directory)
             runtime = Runtime(root / "runtime")
             key = runtime.submit("isolated", "1\n2\n", ["sum"],
@@ -32,6 +32,7 @@ class SandboxTests(unittest.TestCase):
             forbidden.write_text("preserved")
             script = (
                 "from pathlib import Path; "
+                "assert Path(" + repr(str(forbidden)) + ").read_text() == 'preserved'; "
                 "Path(" + repr(str(forbidden)) + ").write_text('changed')"
             )
             process = subprocess.run(isolate([sys.executable, "-I", "-c", script],
