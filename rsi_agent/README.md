@@ -124,3 +124,78 @@ python -m ai_practice report runs/rsi-stress
 模型决策的 HTTP 请求遇到超时、连接中断或临时服务状态时，最多额外尝试一次。短的整数 `Retry-After` 会被遵循，长的或日期格式的等待要求会直接触发现有本地回退。鉴权失败、无效 JSON 和无效配方也直接走回退。工具调用预算仍只统计工具执行。
 
 轨迹逐次记录 HTTP 尝试和等待开销。报告区分模型决策数、实际 HTTP 尝试数、重试数、失败尝试和最终回退。先前生成的轨迹仍可用原有字段重放。
+
+## 持久化 Agent Runtime
+
+已有的 study 入口继续用于 BRS/DRS 机制实验。持久化执行入口直接调用同一工具注册表，适用于固定配方、逐步恢复与独立验收。
+
+```bash
+python -m rsi_agent.durable runs/durable submit examples/runtime_task.json
+python -m rsi_agent.durable runs/durable resume TASK_ID
+python -m rsi_agent.durable runs/durable events TASK_ID
+python -m rsi_agent.runtime_eval runs/runtime-eval
+python -m rsi_agent.runtime_metrics runs/runtime-eval/records.jsonl
+```
+
+submit 返回任务 ID。相同幂等键绑定同一份输入、配方、验证规则和资源策略，重复提交返回同一个任务。不同内容复用键会失败。任务状态为 pending → running → verifying → succeeded/rejected，执行错误进入 failed，中断可进入 interrupted，failed/interrupted 可恢复。进程锁阻止同任务并发执行，SQLite WAL 保存事件、步骤索引及文件哈希清单。工具开始前扣除调用预算，成功后先发布文件检查点，再在同一数据库事务提交索引与事件。若进程在文件发布后、事务提交前退出，会从上一已提交检查点重做该步骤。
+
+检查点覆盖任务工作目录，恢复时检查内容哈希。当前配方均为工作目录内可重放的文件变换。外部写入、支付或发消息等工具需自行提供服务端幂等协议与结果核对，才能注册为可重试操作。任务幂等键覆盖本地执行记录。失败调用仍计入预算，任务恢复不清零预算。
+
+### 执行约束
+
+计划中的 limits 支持 max_calls、timeout_seconds、cpu_seconds、memory_bytes、file_bytes、workspace_bytes、concurrency、isolation。默认见 durable.py。注册表控制允许的命令，清空继承环境，每步使用暂存目录，超时终止进程组。CPU、单文件、文件描述符限制在 POSIX 子进程生效，地址空间限制在 Linux 生效。总工作目录字节数在每步完成后校验，同一 runtime 目录使用固定的跨进程并发上限。
+
+默认 isolation 为 process，提供独立工作目录与受控注册命令。它面向可信本地工具。Linux 可显式设置 isolation 为 bubblewrap，要求主机已安装且允许运行 bwrap，否则任务提交失败。此模式隔离网络及其他命名空间，宿主文件系统只读，工作目录可写，/tmp 独立。宿主只读文件仍可见，部署外部代码时应进一步使用容器仅挂载允许读取的目录。当前实现没有容器级内存或进程数配额。
+
+### 可治理记忆
+
+GovernedMemory 独立存储在 memory.sqlite，旧版经验库可继续用于原有 study。记忆按 subject、内容哈希及 provenance 去重，同一证据重复写入不累加可信度、不延长寿命。每条记录携带 confidence、expires、来源及创建时间。检索过滤过期和低置信条目，冲突候选中选择置信度最高者，同分矛盾返回 conflict 且 selected 为空，保留所有候选来源供复核。信心分数由写入方提供，当前策略不执行统计校准。持久化任务验收完成后自动记录配方结果和检查点来源。
+
+### 独立验证
+
+rules 支持 file、text、data、tests、page、paper。文件检查读取真实文件及 SHA-256，text 对照调用方持有的预期输出，data 检查 JSON 行数、必需非空字段及唯一键。tests 通过独立子进程运行调用方提供的 unittest suite，至少实际执行一个用例且全部通过才接受，套件内容在提交时锁定。测试输出、返回码与套件摘要写入验证证据。
+
+page 检查保存的 HTML 页面状态中是否存在指定元素 ID，适合接入浏览器工具输出的状态快照。此入口尚未连接浏览器，不验证远端实时页面。paper 核对原文文件中的逐字引文并记录原文哈希，语义推论仍需额外审核。验证器规则由调用方提供，Actor 工具不接收 text 的预期输出。验证证据不等同于独立人工标注的真值。
+
+### 系统级评测
+
+runtime_eval 实际运行八个本地任务，包含正确配方、错误配方、故障恢复和宽松文件验证器对照。records.jsonl 使用独立预期产物哈希标记 success，单独记录 verifier_passed。故意宽松的对照用于暴露误接受，报告不用于代表开放任务的总体能力。
+
+summary.json 输出任务成功率、平均工具调用数、Token 均值及覆盖率、P95 延迟、恢复成功率及分母、验证器总体误判率、误接受率、误拒绝率、单位成功任务成本及成本覆盖率。P95 使用最近秩，恢复任务以 recoveries > 0 计数。延迟现按首次提交至终态事件计算，包含恢复停机等待；模型规划入口另外将首次规划时间纳入端到端耗时。records.jsonl 的 active_seconds 单独保留可记录的活跃耗时。本地固定配方未调用模型，因此 Token 为 0。外部模型记录可用 runtime_metrics 导入，缺失用量填 null，报告覆盖率。只有所有任务成本齐备且至少一个成功时才给出单位成功成本，分子包含失败任务成本。--tool-cost 可指定每次工具尝试的计价，属于调用方提供的价格假设。
+
+
+### 记忆参与规划与模型用量
+
+```bash
+python -m rsi_agent.durable runs/planned plan examples/runtime_planned_task.json
+python -m rsi_agent.durable runs/planned memory family:words
+```
+
+规划入口只复用未过期、置信度达标且无同分冲突的成功配方。无可用记忆时使用对应任务族的确定性配方，或通过 `plan --model MODEL --token-price PRICE_PER_TOKEN` 调用现有 OpenAI 兼容规划器。OPENAI_BASE_URL 和 OPENAI_API_KEY 由父进程读取，工具子进程继续清空继承环境。Actor 不接收 rules 中的验收预期。配方、来源、HTTP 尝试及用量在执行前持久化，相同键重复请求复用已记录决策。
+
+如果模型请求期间进程中断，下一次 plan 使用本地配方并保留未知 Token 和成本，避免自动重复发起结果不明的模型请求。发生 HTTP 重试时，返回响应的用量不能覆盖此前请求，任务总量标记为未知。token-price 是调用方提供的每 Token 统一价格，该成本仅计模型 Token，工具执行成本需要另行计入。自动写入记忆的 confidence 为固定策略分数 0.9，表示独立规则已给出结果，尚未做统计校准。
+
+### 操作者权限与实时页面验证
+
+可在新目录预先初始化权限，然后提交计划。权限配置与任务计划分开保存，后续任务只能使用已允许的注册工具和 HTTP origin。
+
+```bash
+python -m rsi_agent.durable runs/restricted init --allow-tool copy \
+  --allow-origin https://example.org
+```
+
+规则示例为 `{"kind":"page_live","url":"https://example.org/task","element_id":"task","attributes":{"data-status":"done"}}`。验证器重新请求实际 HTTP 页面，核对元素 ID 与属性，记录观察时间、响应哈希和字节数。它禁用代理与跳转，并限制响应体大小和等待时间。动态 JavaScript 页面需要浏览器适配器，本入口检查服务端返回的 DOM。page 规则继续用于已有文件快照。终态任务重复执行返回当时的验证记录，需要重新观察页面时应使用新的任务键。
+
+新任务锁定注册工具的命令，恢复时发现工具命令变化或权限撤销会停止执行。旧版任务缺少命令快照时沿用注册工具，迁移后可重新提交以锁定实现。默认初始化允许现有注册工具、禁止实时 HTTP 页面访问。Bubblewrap 仍保留宿主只读文件可见的边界，部署时需要根据允许读取的数据进一步限制挂载。
+
+### 从真实执行记录导出系统指标
+
+将独立标注写入 labels.json，格式为任务 ID 到布尔成功标签的映射，例如 `{"TASK_ID": true}`。执行：
+
+```bash
+python -m rsi_agent.runtime_export runs/planned labels.json runs/planned-report
+```
+
+输出 records.jsonl 与 summary.json。模型 Token 和声明价格从持久化用量表读取，缺失值保留为 null。没有调用模型的固定配方任务 Token 为 0。执行在验证前失败时，verifier_passed 为 null，该任务仍计入成功率与执行成本，验证器误判统计仅覆盖实际给出判定的任务，并报告 verifier_coverage。
+
+CI 包含 Linux Bubblewrap 实机用例和本地 HTTP 服务状态变更用例。受限本机禁止监听端口时实时 HTTP 用例跳过，Linux CI 负责执行该项。系统本地样例故意包含错误配方和弱验证器，用于核对分母与误判统计。

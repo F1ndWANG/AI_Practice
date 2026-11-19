@@ -46,3 +46,20 @@ jobs:
           name: acceptance-python-${{ matrix.python-version }}
           path: runs/ci-acceptance/bundle/
           if-no-files-found: error
+
+  runtime-isolation:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime isolation dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          python -m pip install .
+      - name: Verify actual namespace isolation and live HTTP state
+        run: |
+          python -m unittest discover -s tests -p test_runtime_sandbox.py -v
+          python -m unittest discover -s tests -p test_runtime_integration.py -v
