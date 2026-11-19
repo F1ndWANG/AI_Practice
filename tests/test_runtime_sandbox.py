@@ -22,7 +22,9 @@ class SandboxTests(unittest.TestCase):
                                  [{"kind": "text", "expected": "3\n"}],
                                  limits={"isolation": "bubblewrap"})
             result = runtime.run(key)
-            self.assertEqual(result["state"], "succeeded", result["error"])
+            log = root / "runtime" / key / "tool.log"
+            diagnostic = log.read_text(errors="replace") if log.is_file() else result["error"]
+            self.assertEqual(result["state"], "succeeded", diagnostic)
             runtime.close()
             workspace = root / "workspace"
             workspace.mkdir()

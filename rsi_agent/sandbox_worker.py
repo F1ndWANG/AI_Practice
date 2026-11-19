@@ -16,7 +16,7 @@ def isolate(command, root, mode):
         raise RuntimeError("bubblewrap isolation requires Linux and an installed bwrap executable")
     return [executable, "--unshare-all", "--new-session", "--die-with-parent",
             "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
-            "--tmpfs", "/tmp", "--bind", str(root), "/work", "--chdir", "/work", *command]
+            "--tmpfs", "/tmp", "--bind", str(root), str(root), "--chdir", str(root), *command]
 
 
 def main():
