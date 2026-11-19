@@ -145,17 +145,17 @@ submit 返回任务 ID。相同幂等键绑定同一份输入、配方、验证�
 
 计划中的 limits 支持 max_calls、timeout_seconds、cpu_seconds、memory_bytes、file_bytes、workspace_bytes、concurrency、isolation。默认见 durable.py。注册表控制允许的命令，清空继承环境，每步使用暂存目录，超时终止进程组。CPU、单文件、文件描述符限制在 POSIX 子进程生效，地址空间限制在 Linux 生效。总工作目录字节数在每步完成后校验，同一 runtime 目录使用固定的跨进程并发上限。
 
-默认 isolation 为 process，提供独立工作目录与受控注册命令。它面向可信本地工具。Linux 可显式设置 isolation 为 bubblewrap，要求主机已安装且允许运行 bwrap，否则任务提交失败。此模式隔离网络及其他命名空间，宿主文件系统只读，工作目录可写，/tmp 独立。宿主只读文件仍可见，部署外部代码时应进一步使用容器仅挂载允许读取的目录。当前实现没有容器级内存或进程数配额。
+默认 isolation 为 process，提供独立工作目录与受控注册命令。它面向可信本地工具。Linux 可显式设置 isolation 为 bubblewrap，要求主机已安装且允许运行 bwrap，否则任务提交失败。此模式隔离网络及其他命名空间，宿主文件系统只读，工作目录可写，/tmp 独立。宿主只读文件仍可见，部署外部代码时应进一步使用容器仅挂载允许读取的目录。Docker 模式另外提供容器级内存、CPU 和进程数配额，见后续说明。
 
 ### 可治理记忆
 
-GovernedMemory 独立存储在 memory.sqlite，旧版经验库可继续用于原有 study。记忆按 subject、内容哈希及 provenance 去重，同一证据重复写入不累加可信度、不延长寿命。每条记录携带 confidence、expires、来源及创建时间。检索过滤过期和低置信条目，冲突候选中选择置信度最高者，同分矛盾返回 conflict 且 selected 为空，保留所有候选来源供复核。信心分数由写入方提供，当前策略不执行统计校准。持久化任务验收完成后自动记录配方结果和检查点来源。
+GovernedMemory 独立存储在 memory.sqlite，旧版经验库可继续用于原有 study。记忆按 subject、内容哈希及 provenance 去重，同一证据重复写入不累加可信度、不延长寿命。每条记录携带 confidence、expires、来源及创建时间。检索过滤过期和低置信条目，冲突候选中选择置信度最高者，同分矛盾返回 conflict 且 selected 为空，保留所有候选来源供复核。写入方提供的分数保留为 declared；独立标注导入后，以 Beta(1,1) 先验和实际成败观测计算后验均值。持久化任务验收完成后自动记录配方结果和检查点来源。
 
 ### 独立验证
 
 rules 支持 file、text、data、tests、page、paper。文件检查读取真实文件及 SHA-256，text 对照调用方持有的预期输出，data 检查 JSON 行数、必需非空字段及唯一键。tests 通过独立子进程运行调用方提供的 unittest suite，至少实际执行一个用例且全部通过才接受，套件内容在提交时锁定。测试输出、返回码与套件摘要写入验证证据。
 
-page 检查保存的 HTML 页面状态中是否存在指定元素 ID，适合接入浏览器工具输出的状态快照。此入口尚未连接浏览器，不验证远端实时页面。paper 核对原文文件中的逐字引文并记录原文哈希，语义推论仍需额外审核。验证器规则由调用方提供，Actor 工具不接收 text 的预期输出。验证证据不等同于独立人工标注的真值。
+page 检查保存的 HTML 页面状态中是否存在指定元素 ID，适合接入浏览器工具输出的状态快照。动态网页可使用 browser 规则，在独立 Chromium 上下文中执行 JavaScript 后读取 DOM。paper 核对原文文件中的逐字引文并记录原文哈希，语义推论仍需额外审核。验证器规则由调用方提供，Actor 工具不接收 text 的预期输出。验证证据不等同于独立人工标注的真值。
 
 ### 系统级评测
 
@@ -171,9 +171,9 @@ python -m rsi_agent.durable runs/planned plan examples/runtime_planned_task.json
 python -m rsi_agent.durable runs/planned memory family:words
 ```
 
-规划入口只复用未过期、置信度达标且无同分冲突的成功配方。无可用记忆时使用对应任务族的确定性配方，或通过 `plan --model MODEL --token-price PRICE_PER_TOKEN` 调用现有 OpenAI 兼容规划器。OPENAI_BASE_URL 和 OPENAI_API_KEY 由父进程读取，工具子进程继续清空继承环境。Actor 不接收 rules 中的验收预期。配方、来源、HTTP 尝试及用量在执行前持久化，相同键重复请求复用已记录决策。
+规划入口只复用未过期、至少具备五条独立标注、后验置信度达标且无同分冲突的成功配方。无可用记忆时使用对应任务族的确定性配方，或通过 `plan --model MODEL --token-price PRICE_PER_TOKEN` 调用现有 OpenAI 兼容规划器。OPENAI_BASE_URL 和 OPENAI_API_KEY 由父进程读取，工具子进程继续清空继承环境。Actor 不接收 rules 中的验收预期。配方、来源、HTTP 尝试及用量在执行前持久化，相同键重复请求复用已记录决策。
 
-如果模型请求期间进程中断，下一次 plan 使用本地配方并保留未知 Token 和成本，避免自动重复发起结果不明的模型请求。发生 HTTP 重试时，返回响应的用量不能覆盖此前请求，任务总量标记为未知。token-price 是调用方提供的每 Token 统一价格，该成本仅计模型 Token，工具执行成本需要另行计入。自动写入记忆的 confidence 为固定策略分数 0.9，表示独立规则已给出结果，尚未做统计校准。
+如果模型请求期间进程中断，下一次 plan 使用本地配方并保留未知 Token 和成本，避免自动重复发起结果不明的模型请求。发生 HTTP 重试时，返回响应的用量不能覆盖此前请求，任务总量标记为未知。token-price 是调用方提供的每 Token 统一价格，该成本仅计模型 Token，工具执行成本需要另行计入。自动写入的 declared 分数为 0.9，仅表示规则验收记录；规划复用须通过五条独立标注门槛，之后使用观测估计的后验均值。
 
 ### 操作者权限与实时页面验证
 
@@ -184,7 +184,7 @@ python -m rsi_agent.durable runs/restricted init --allow-tool copy \
   --allow-origin https://example.org
 ```
 
-规则示例为 `{"kind":"page_live","url":"https://example.org/task","element_id":"task","attributes":{"data-status":"done"}}`。验证器重新请求实际 HTTP 页面，核对元素 ID 与属性，记录观察时间、响应哈希和字节数。它禁用代理与跳转，并限制响应体大小和等待时间。动态 JavaScript 页面需要浏览器适配器，本入口检查服务端返回的 DOM。page 规则继续用于已有文件快照。终态任务重复执行返回当时的验证记录，需要重新观察页面时应使用新的任务键。
+规则示例为 `{"kind":"page_live","url":"https://example.org/task","element_id":"task","attributes":{"data-status":"done"}}`。验证器重新请求实际 HTTP 页面，核对元素 ID 与属性，记录观察时间、响应哈希和字节数。它禁用代理与跳转，并限制响应体大小和等待时间。page_live 检查服务端返回的 DOM，browser 规则用于 JavaScript 渲染后的页面。page 规则继续用于已有文件快照。终态任务重复执行返回当时的验证记录，需要重新观察页面时应使用新的任务键。
 
 新任务锁定注册工具的命令，恢复时发现工具命令变化或权限撤销会停止执行。旧版任务缺少命令快照时沿用注册工具，迁移后可重新提交以锁定实现。默认初始化允许现有注册工具、禁止实时 HTTP 页面访问。Bubblewrap 仍保留宿主只读文件可见的边界，部署时需要根据允许读取的数据进一步限制挂载。
 
@@ -199,3 +199,61 @@ python -m rsi_agent.runtime_export runs/planned labels.json runs/planned-report
 输出 records.jsonl 与 summary.json。模型 Token 和声明价格从持久化用量表读取，缺失值保留为 null。没有调用模型的固定配方任务 Token 为 0。执行在验证前失败时，verifier_passed 为 null，该任务仍计入成功率与执行成本，验证器误判统计仅覆盖实际给出判定的任务，并报告 verifier_coverage。
 
 CI 包含 Linux Bubblewrap 实机用例和本地 HTTP 服务状态变更用例。受限本机禁止监听端口时实时 HTTP 用例跳过，Linux CI 负责执行该项。系统本地样例故意包含错误配方和弱验证器，用于核对分母与误判统计。
+
+
+### 外部写操作与不确定结果恢复
+
+新增 http_write 网关工具，使用服务端支持的幂等协议。每个任务步骤派生固定操作键，先持久化请求哈希与 intent，再查询服务端操作回执。不存在时才 PUT，同一个操作键只能绑定同一份请求。回执须包含匹配的 idempotency_key、request_sha256、status=succeeded。连接丢失或进程中断后，恢复先查服务端，再确认本地回执，最后提交文件检查点。
+
+参考服务对计数器更新与回执记录执行同一个 SQLite 事务，提供可运行的非幂等业务操作示例。启动服务与提交任务分别在两个终端执行：
+
+```bash
+mkdir -p runs
+python -m rsi_agent.effect_service runs/effect-service.sqlite --port 8085
+```
+
+```bash
+python -m rsi_agent.durable runs/external init --allow-tool http_write \
+  --allow-origin http://127.0.0.1:8085
+python -m rsi_agent.durable runs/external submit examples/runtime_external_task.json
+```
+
+参考服务绑定本机地址，不包含生产认证功能。连接其他业务系统时，需要该系统真正实现上述事务、幂等与查询协议。普通网页点击或任意 HTTP API 的副作用无法凭客户端检查点获得同等保障。网关只访问操作者允许的 origin，拒绝跳转，限制请求、响应大小，并通过可终止的子进程执行 HTTP 请求。data 验证器可用 expected_fields 检查回执中的业务结果。
+
+### 动态网页验证
+
+安装浏览器依赖：
+
+```bash
+python -m pip install '.[browser]'
+python -m playwright install chromium
+```
+
+规则示例为 `{"kind":"browser","url":"https://example.org/task","selector":"#status","attributes":{"data-state":"ready"},"text":"Ready"}`。独立 Chromium 上下文等待目标 DOM 状态，保存最终 URL、观察时间、DOM 哈希与匹配文本。HTTP 请求仅允许已批准 origin 的 GET/HEAD，禁用 Service Worker、WebSocket 和下载。父进程为整个验证子进程设置超时并终止其进程组。该适配器观察页面，不自动执行带副作用的表单操作。页面资源与浏览器本身的安全性仍取决于浏览器部署环境。
+
+### 有限挂载与容器配额
+
+准备容器镜像：
+
+```bash
+docker build -t ai-practice-runtime:local -f examples/runtime.Dockerfile examples
+```
+
+在 limits 中设置 isolation=docker，可另外指定 memory_bytes、cpu_quota、max_processes。提交时固定本地镜像 ID，恢复沿用该 ID，执行不自动拉取镜像。容器关闭网络与新增权限，根文件系统只读，只挂载工具代码和当前工作目录，独立测试套件按需只读挂载。宿主其他文件和 Runtime 数据库不挂入容器。临时目录使用限额 tmpfs，Docker cgroup 执行内存、CPU 及进程数限制。
+
+容器名称在启动前写入事件日志，超时会强制删除容器，恢复任务时会清理该任务此前登记的容器。容器保护适用于工具与测试子进程，模型调用、受控 HTTP 网关和浏览器验证在控制进程侧运行。生产部署还需对控制进程配置服务账户与主机级资源限制。process 和 bubblewrap 模式继续保留，便于已有任务迁移。
+
+### 用独立标注更新与评估记忆置信度
+
+```bash
+python -m rsi_agent.runtime_export runs/planned calibration-labels.json runs/calibration-report \
+  --calibrate-memory --tool-cost 0.001
+python -m rsi_agent.durable runs/planned memory family:words --require-calibrated
+python -m rsi_agent.memory_calibration runs/planned/memory.sqlite heldout-memory-labels.jsonl
+```
+
+校准标签沿用 task_id 到布尔真值的 JSON 映射，导出时显式启用 --calibrate-memory。每个任务的独立标注最多记一次，同一观测 ID 的标签或来源变化会失败。重复导出不会增加证据数。后验分数为 (成功观测数+1)/(观测总数+2)，它是经验可信度估计，需要在独立数据上检查表现。
+
+留出 JSONL 每行包含 id、subject、value、success，value 对应记忆候选，例如 `{"recipe":["sum"],"passed":true}`。评估拒绝与校准使用相同的候选和观测 ID，报告覆盖数、Brier Score 及十桶 ECE。未达五条观测、已过期或不存在的候选计入未覆盖。实际数据的校准质量由报告体现，样例结果不能替代业务验证。
+
+成本导出可同时保留模型成本与按工具尝试数计价的工具成本。缺失模型用量继续标记未知；提供 --tool-cost 后，只有组成项齐备才计算总成本。Token 与价格来自接口记录及调用方声明，项目不生成虚构账单。

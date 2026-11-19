@@ -88,6 +88,14 @@ class RuntimeIntegrationTests(unittest.TestCase):
                              model="fixture", token_price=0.001)
             result = runtime.run(key)
             self.assertEqual(result["state"], "succeeded")
+            memory = GovernedMemory(Path(directory) / "memory.sqlite")
+            try:
+                for index in range(5):
+                    memory.observe("family:words", {"recipe": ["normalize", "sort_normalized"], "passed": True},
+                                   observation_id=f"independent-{index}", success=True,
+                                   provenance={"source": "held_out_fixture"})
+            finally:
+                memory.close()
             with patch("rsi_agent.runtime_planning.model_recipe") as model:
                 self.assertEqual(submit(runtime, "planned", source, "words", rules,
                                         model="fixture", token_price=0.001), key)

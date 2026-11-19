@@ -14,7 +14,7 @@ import time
 from html.parser import HTMLParser
 from pathlib import Path
 
-from .sandbox_worker import isolate
+from .sandbox_worker import isolate, remove_container
 from .live_verifier import fetch_page
 
 
@@ -24,7 +24,30 @@ class GovernedMemory:
         self.db.execute("""CREATE TABLE IF NOT EXISTS governed_memory (
             subject TEXT, digest TEXT, value TEXT, confidence REAL, expires REAL,
             provenance TEXT, created REAL, PRIMARY KEY(subject, digest, provenance))""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS memory_observations (
+            subject TEXT, digest TEXT, observation_id TEXT, label INTEGER, provenance TEXT,
+            PRIMARY KEY(subject,digest,observation_id))""")
         self.db.commit()
+
+    def observe(self, subject, value, *, observation_id, success, provenance):
+        if (type(success) is not bool or not observation_id
+                or not isinstance(provenance, dict) or not provenance.get("source")):
+            raise ValueError("Calibration requires independent labels, IDs and source provenance")
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        if not self.db.execute("SELECT 1 FROM governed_memory WHERE subject=? AND digest=?",
+                               (subject, digest)).fetchone():
+            raise ValueError("Cannot calibrate an unknown memory candidate")
+        with self.db:
+            old = self.db.execute(
+                "SELECT label,provenance FROM memory_observations WHERE subject=? AND digest=? AND observation_id=?",
+                (subject, digest, observation_id)).fetchone()
+            source = json.dumps(provenance, sort_keys=True)
+            if old is not None and old != (int(success), source):
+                raise ValueError("Observation ID is bound to a different label or provenance")
+            self.db.execute("INSERT OR IGNORE INTO memory_observations VALUES (?,?,?,?,?)",
+                            (subject, digest, observation_id, int(success), source))
+        return digest
 
     def close(self):
         self.db.close()
@@ -44,19 +67,33 @@ class GovernedMemory:
                             (subject, digest, encoded, confidence, now + ttl_seconds, source, now))
         return digest
 
-    def recall(self, subject, *, min_confidence=0.5, now=None):
+    def recall(self, subject, *, min_confidence=0.5, now=None,
+               require_calibrated=False, min_observations=5):
         now = time.time() if now is None else now
         rows = self.db.execute(
             "SELECT digest,value,confidence,expires,provenance FROM governed_memory "
-            "WHERE subject=? AND expires>? AND confidence>=? ORDER BY confidence DESC,digest",
-            (subject, now, min_confidence)).fetchall()
+            "WHERE subject=? AND expires>? ORDER BY confidence DESC,digest",
+            (subject, now)).fetchall()
         candidates = {}
         for digest, value, confidence, expires, source in rows:
             candidate = candidates.setdefault(digest, {
                 "value": json.loads(value), "confidence": confidence, "expires": expires,
                 "provenance": []})
             candidate["provenance"].append(json.loads(source))
-        values = list(candidates.values())
+        values = []
+        for digest, candidate in candidates.items():
+            observations, successes = self.db.execute(
+                "SELECT count(*),coalesce(sum(label),0) FROM memory_observations WHERE subject=? AND digest=?",
+                (subject, digest)).fetchone()
+            candidate["observations"] = observations
+            candidate["confidence_method"] = "declared"
+            if observations:
+                candidate["confidence"] = (successes + 1) / (observations + 2)
+                candidate["confidence_method"] = "beta_posterior"
+            if ((not require_calibrated or observations >= min_observations)
+                    and candidate["confidence"] >= min_confidence):
+                values.append(candidate)
+        values.sort(key=lambda item: item["confidence"], reverse=True)
         if not values:
             return {"state": "missing", "selected": None, "candidates": []}
         tied = sum(item["confidence"] == values[0]["confidence"] for item in values) > 1
@@ -87,6 +124,28 @@ class PageState(HTMLParser):
 def verify(root, rule):
     """Evaluate evidence without consulting the actor or its self-assessment."""
     kind = rule["kind"]
+    if kind == "browser":
+        limits = rule.get("_limits", {})
+        payload = json.dumps({"rule": {key: value for key, value in rule.items() if not key.startswith("_")},
+                              "origins": rule.get("_allowed_origins", []),
+                              "timeout": limits.get("timeout_seconds", 3)})
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen([sys.executable, "-m", "rsi_agent.browser_verifier"],
+                                       stdin=subprocess.PIPE, stdout=log, stderr=log, text=True,
+                                       start_new_session=True,
+                                       env={name: value for name, value in os.environ.items()
+                                            if name in {"PATH", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "LD_LIBRARY_PATH"}})
+            try:
+                process.communicate(payload, timeout=limits.get("timeout_seconds", 3) + 5)
+            except BaseException:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                raise
+            log.seek(0)
+            output = log.read().decode("utf-8", errors="replace")
+        if process.returncode:
+            raise RuntimeError("Browser verification failed: " + output[-2000:])
+        return json.loads(output)
     if kind == "page_live":
         limits = rule.get("_limits", {})
         text, evidence = fetch_page(
@@ -110,7 +169,7 @@ def verify(root, rule):
                                "file_bytes": limits.get("file_bytes", 1048576),
                                "memory_bytes": limits.get("memory_bytes", 536870912)}),
                    sys.executable, "-I", "-B", "-m", "unittest", "discover", "-s", str(suite)]
-        command = isolate(command, root, limits.get("isolation", "process"))
+        command = isolate(command, root, limits.get("isolation", "process"), limits, readonly_paths=[suite])
         with tempfile.TemporaryFile() as log:
             process = subprocess.Popen(command, cwd=root, stdout=log, stderr=log,
                                        env={"PATH": os.defpath, "LC_ALL": "C"}, start_new_session=True)
@@ -120,6 +179,8 @@ def verify(root, rule):
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
                 raise
+            finally:
+                remove_container(command)
             log.seek(0)
             output = log.read().decode("utf-8", errors="replace")
         counts = re.findall(r"Ran (\d+) tests?", output)
@@ -140,6 +201,11 @@ def verify(root, rule):
         passed = raw.decode("utf-8") == rule["expected"]
     elif kind == "data":
         rows = json.loads(raw)
+        if "expected_fields" in rule:
+            fields = rule["expected_fields"]
+            passed = (isinstance(rows, dict) and isinstance(fields, dict) and bool(fields)
+                      and all(key in rows and rows[key] == value for key, value in fields.items()))
+            return {"passed": passed, "evidence": evidence}
         passed = isinstance(rows, list) and len(rows) >= rule.get("min_rows", 1)
         if passed:
             passed = all(isinstance(row, dict) and all(

@@ -32,7 +32,7 @@ def submit(runtime, key, source, family, rules, *, model=None, limits=None, toke
         else:
             memory = GovernedMemory(runtime.root / "memory.sqlite")
             try:
-                recalled = memory.recall(subject)
+                recalled = memory.recall(subject, require_calibrated=True)
             finally:
                 memory.close()
             recipe = None
