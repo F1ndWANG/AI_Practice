@@ -168,6 +168,20 @@ class ExternalServiceTests(unittest.TestCase):
             self.assertEqual(runtime.db.execute("SELECT state FROM external_effects").fetchone()[0], "confirmed")
             runtime.close()
 
+    def test_queue_recovers_lost_service_response_with_a_bounded_retry(self):
+        from rsi_agent.task_worker import drain
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Runtime(directory, permissions={"tools": ["http_write"], "origins": [self.url]})
+            key = runtime.submit("queued", json.dumps({
+                "url": self.url + "/operations", "payload": {"value": 42}}),
+                ["http_write"], [{"kind": "file"}])
+            result = drain(runtime, max_attempts=2, retry_delay=0)
+            self.assertTrue(result["passed"], result)
+            self.assertEqual(runtime.status(key)["attempts"], 2)
+            self.assertEqual(runtime.status(key)["external_operations"][0]["state"], "confirmed")
+            self.assertEqual(self.puts, 1)
+            runtime.close()
+
     def test_interruption_after_confirmed_receipt_reuses_committed_service_result(self):
         self.lose_response = False
         with tempfile.TemporaryDirectory() as directory:

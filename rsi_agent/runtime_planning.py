@@ -84,7 +84,7 @@ def export_record(runtime, task_id, *, success):
     if type(success) is not bool:
         raise ValueError("An independent boolean success label is required")
     task = runtime.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if task is None or task["state"] not in {"succeeded", "rejected", "failed"}:
+    if task is None or task["state"] not in {"succeeded", "rejected", "failed", "cancelled", "timed_out"}:
         raise ValueError("Only terminal task attempts can be exported")
     first = runtime.db.execute(
         "SELECT min(timestamp) FROM events WHERE task_id=? AND kind='submitted'", (task_id,)).fetchone()[0]
@@ -97,7 +97,9 @@ def export_record(runtime, task_id, *, success):
         verdict = None
     else:
         verdict = all(check["passed"] for check in json.loads(task["verification"]))
-    return {"task_id": task_id, "success": success, "verifier_passed": verdict,
+    control = runtime.db.execute("SELECT attempts FROM task_controls WHERE task_id=?", (task_id,)).fetchone()
+    return {"task_id": task_id, "success": success, "state": task["state"],
+            "attempts": control["attempts"] if control else None, "verifier_passed": verdict,
             "tool_calls": task["calls"], "seconds": max(0, last - first),
             "active_seconds": task["seconds"], "recoveries": task["recoveries"],
             "tokens": usage["tokens"] if usage else 0, "cost": usage["cost"] if usage else None,

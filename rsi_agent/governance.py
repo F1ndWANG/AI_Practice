@@ -5,7 +5,6 @@ import json
 import math
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
@@ -16,6 +15,7 @@ from pathlib import Path
 
 from .sandbox_worker import isolate, remove_container
 from .live_verifier import fetch_page
+from .execution_control import json_process, wait_process
 
 
 class GovernedMemory:
@@ -126,32 +126,26 @@ def verify(root, rule):
     kind = rule["kind"]
     if kind == "browser":
         limits = rule.get("_limits", {})
-        payload = json.dumps({"rule": {key: value for key, value in rule.items() if not key.startswith("_")},
-                              "origins": rule.get("_allowed_origins", []),
-                              "timeout": limits.get("timeout_seconds", 3)})
-        with tempfile.TemporaryFile() as log:
-            process = subprocess.Popen([sys.executable, "-m", "rsi_agent.browser_verifier"],
-                                       stdin=subprocess.PIPE, stdout=log, stderr=log, text=True,
-                                       start_new_session=True,
-                                       env={name: value for name, value in os.environ.items()
-                                            if name in {"PATH", "HOME", "PLAYWRIGHT_BROWSERS_PATH", "LD_LIBRARY_PATH"}})
-            try:
-                process.communicate(payload, timeout=limits.get("timeout_seconds", 3) + 5)
-            except BaseException:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
-            log.seek(0)
-            output = log.read().decode("utf-8", errors="replace")
-        if process.returncode:
-            raise RuntimeError("Browser verification failed: " + output[-2000:])
-        return json.loads(output)
+        payload = {"rule": {key: value for key, value in rule.items() if not key.startswith("_")},
+                   "origins": rule.get("_allowed_origins", []),
+                   "timeout": limits.get("timeout_seconds", 3)}
+        return json_process("rsi_agent.browser_verifier", payload,
+                            limits.get("timeout_seconds", 3) + 5, check=rule.get("_control_check"))
     if kind == "page_live":
         limits = rule.get("_limits", {})
-        text, evidence = fetch_page(
-            rule["url"], rule.get("_allowed_origins", []),
-            timeout=limits.get("timeout_seconds", 3),
-            max_bytes=limits.get("file_bytes", 1048576))
+        if rule.get("_control_check"):
+            response = json_process(
+                "rsi_agent.live_verifier",
+                {"url": rule["url"], "origins": rule.get("_allowed_origins", []),
+                 "timeout": limits.get("timeout_seconds", 3),
+                 "max_bytes": limits.get("file_bytes", 1048576)},
+                limits.get("timeout_seconds", 3), check=rule["_control_check"])
+            text, evidence = response["text"], response["evidence"]
+        else:
+            text, evidence = fetch_page(
+                rule["url"], rule.get("_allowed_origins", []),
+                timeout=limits.get("timeout_seconds", 3),
+                max_bytes=limits.get("file_bytes", 1048576))
         parser = PageState(rule["element_id"])
         parser.feed(text)
         passed = parser.found and all(
@@ -174,11 +168,7 @@ def verify(root, rule):
             process = subprocess.Popen(command, cwd=root, stdout=log, stderr=log,
                                        env={"PATH": os.defpath, "LC_ALL": "C"}, start_new_session=True)
             try:
-                code = process.wait(timeout=timeout)
-            except BaseException:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
+                code = wait_process(process, timeout, check=rule.get("_control_check"))
             finally:
                 remove_container(command)
             log.seek(0)

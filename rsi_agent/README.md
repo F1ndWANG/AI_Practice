@@ -257,3 +257,24 @@ python -m rsi_agent.memory_calibration runs/planned/memory.sqlite heldout-memory
 留出 JSONL 每行包含 id、subject、value、success，value 对应记忆候选，例如 `{"recipe":["sum"],"passed":true}`。评估拒绝与校准使用相同的候选和观测 ID，报告覆盖数、Brier Score 及十桶 ECE。未达五条观测、已过期或不存在的候选计入未覆盖。实际数据的校准质量由报告体现，样例结果不能替代业务验证。
 
 成本导出可同时保留模型成本与按工具尝试数计价的工具成本。缺失模型用量继续标记未知；提供 --tool-cost 后，只有组成项齐备才计算总成本。Token 与价格来自接口记录及调用方声明，项目不生成虚构账单。
+
+
+### 任务队列、状态查询与取消
+
+```bash
+python -m rsi_agent.durable runs/queue enqueue examples/runtime_task.json
+python -m rsi_agent.durable runs/queue status
+python -m rsi_agent.task_worker runs/queue --max-attempts 3 --retry-delay 0.25
+python -m rsi_agent.durable runs/queue status TASK_ID
+python -m rsi_agent.durable runs/queue cancel TASK_ID
+```
+
+enqueue 只提交固定配方任务，submit 仍提交后立即执行。status 提供当前状态、已提交检查点、总步骤数、工具调用数、执行尝试数、截止时间、取消请求和外部操作回执状态，省略任务原始输入。运行中的取消先写 cancel_requested，由执行进程确认后进入 cancelled；排队、失败或中断任务可以直接取消。重复取消和重复读取终态不会重新执行任务。
+
+工具、独立测试、受控 HTTP 网关及浏览器子进程在等待期间检查取消与总预算。取消时终止子进程组，Docker 任务还会删除登记的容器。cancelled 与 timed_out 为终态；需要重新执行时创建新的任务键。取消不能撤销已经在外部服务生效的业务操作，status 中的 external_operations 和事件日志可用于核对 intent、uncertain、confirmed。
+
+新任务的 limits.total_seconds 默认 300 秒，提交时将绝对截止时间保存到 SQLite，包含排队、重试等待和中断停机时间，恢复不会重置。它覆盖任务提交后的运行阶段；模型规划请求仍由规划器自己的请求超时控制。单工具 timeout_seconds 独立生效。旧版任务缺少总预算记录时保留原有行为。
+
+task_worker 处理启动时队列快照，完成后退出。针对 OS 错误、单工具超时、工具容量暂不可用和网关请求失败执行有界重试与指数退避。幂等协议不匹配、工具命令变更、预算耗尽等错误停止自动重试。max-attempts 按数据库中累计执行次数判断，重启 worker 不清零；工具调用预算同样跨重试累计。其他进程已持有任务锁时跳过该任务并在报告中保留状态。worker 不重新调用模型规划。
+
+指标导出新增取消数、总预算超时数、平均尝试数及生命周期覆盖率。取消、超时或验证前执行失败的任务，verifier_passed 保留为 null，避免将未给出判定的任务计入验证器误判。

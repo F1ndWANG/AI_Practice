@@ -13,6 +13,12 @@ def summarize(rows):
         if (type(row.get("success")) is not bool
                 or row.get("verifier_passed") is not None and type(row["verifier_passed"]) is not bool):
             raise ValueError("Independent success labels and verifier verdicts must be booleans")
+        if row.get("attempts") is not None and (type(row["attempts"]) is not int or row["attempts"] < 0):
+            raise ValueError("Attempt counts must be nonnegative integers or null")
+        if row.get("state") is not None and row["state"] not in {
+            "succeeded", "rejected", "failed", "cancelled", "timed_out"
+        }:
+            raise ValueError("Lifecycle metrics require terminal task states")
         for field in ("tool_calls", "seconds", "recoveries"):
             value = row[field]
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -30,9 +36,15 @@ def summarize(rows):
     actual_successes = [row for row in verified if row["success"]]
     latencies = sorted(row["seconds"] for row in rows)
     token_rows = [row for row in rows if row.get("tokens") is not None]
+    attempt_rows = [row for row in rows if row.get("attempts") is not None]
     costs = [row["cost"] for row in rows if row.get("cost") is not None]
     return {
-        "tasks": count, "task_success_rate": successful / count,
+        "tasks": count,
+        "lifecycle_coverage": sum(row.get("state") is not None for row in rows) / count,
+        "cancelled_tasks": sum(row.get("state") == "cancelled" for row in rows),
+        "timed_out_tasks": sum(row.get("state") == "timed_out" for row in rows),
+        "attempt_coverage": len(attempt_rows) / count,
+        "mean_attempts": sum(row["attempts"] for row in attempt_rows) / len(attempt_rows) if attempt_rows else None, "task_success_rate": successful / count,
         "mean_tool_calls": sum(row["tool_calls"] for row in rows) / count,
         "mean_tokens": sum(row["tokens"] for row in token_rows) / len(token_rows) if token_rows else None,
         "token_coverage": len(token_rows) / count,

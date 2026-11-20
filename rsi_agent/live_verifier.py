@@ -44,3 +44,17 @@ def fetch_page(url, allowed_origins, *, timeout, max_bytes):
     return raw.decode(charset), {"url": url, "sha256": hashlib.sha256(raw).hexdigest(),
                                 "bytes": size, "observed_at": time.time(),
                                 "scope": "live_http_response_dom"}
+
+
+
+def main():
+    import json
+    import sys
+    request = json.load(sys.stdin)
+    text, evidence = fetch_page(request["url"], request["origins"],
+                                timeout=request["timeout"], max_bytes=request["max_bytes"])
+    print(json.dumps({"text": text, "evidence": evidence}))
+
+
+if __name__ == "__main__":
+    main()

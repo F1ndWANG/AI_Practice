@@ -2,15 +2,16 @@
 
 import hashlib
 import json
-import os
-import signal
-import subprocess
 import sys
-import tempfile
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from .live_verifier import NoRedirect, origin
+from .execution_control import json_process
+
+
+class GatewayError(RuntimeError):
+    pass
 
 
 def encode(value):
@@ -25,7 +26,7 @@ def response_json(opener, request, timeout, max_bytes):
         return json.loads(raw)
 
 
-def execute(runtime, task_id, index, request, limits):
+def execute(runtime, task_id, index, request, limits, check=None):
     url = request["url"].rstrip("/")
     if origin(url) not in {origin(value) for value in runtime.permissions["origins"]}:
         raise ValueError("External service origin is not permitted")
@@ -52,24 +53,14 @@ def execute(runtime, task_id, index, request, limits):
             runtime.event(task_id, "external_intent", {"step": index, "operation": operation,
                                                       "request_sha256": digest})
     try:
-        payload = json.dumps({"url": endpoint, "body": body.decode(), "operation": operation,
-                              "digest": digest, "timeout": limits["timeout_seconds"],
-                              "max_bytes": limits["file_bytes"]})
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-            process = subprocess.Popen([sys.executable, "-m", "rsi_agent.external_effects"],
-                                       stdin=subprocess.PIPE, stdout=output, stderr=errors,
-                                       text=True, env={"PATH": os.defpath}, start_new_session=True)
-            try:
-                process.communicate(payload, timeout=limits["timeout_seconds"])
-            except BaseException:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
-            if process.returncode:
-                errors.seek(0)
-                raise RuntimeError("External gateway failed: " + errors.read(2000).decode(errors="replace"))
-            output.seek(0)
-            receipt = json.load(output)
+        payload = {"url": endpoint, "body": body.decode(), "operation": operation,
+                   "digest": digest, "timeout": limits["timeout_seconds"],
+                   "max_bytes": limits["file_bytes"]}
+        try:
+            receipt = json_process("rsi_agent.external_effects", payload,
+                                   limits["timeout_seconds"], check=check)
+        except RuntimeError as error:
+            raise GatewayError(str(error)) from error
         if (not isinstance(receipt, dict) or receipt.get("idempotency_key") != operation
                 or receipt.get("request_sha256") != digest or receipt.get("status") != "succeeded"):
             raise ValueError("External operation has no matching, successful service receipt")

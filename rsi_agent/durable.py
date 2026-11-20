@@ -7,7 +7,6 @@ import json
 import math
 import os
 import shutil
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +17,8 @@ from pathlib import Path
 
 from .governance import GovernedMemory, verify
 from .runtime import TOOLS as LOCAL_TOOLS
-from .external_effects import execute as execute_external
+from .external_effects import execute as execute_external, GatewayError
+from .execution_control import (TaskCancelled, TaskDeadlineExceeded, ToolCapacityError, wait_process)
 
 from .live_verifier import origin
 from .sandbox_worker import isolate, container_image, remove_container
@@ -28,11 +28,12 @@ TOOLS = {**LOCAL_TOOLS, "http_write": ("runtime-gateway", "http_write")}
 DEFAULTS = {"max_calls": 6, "timeout_seconds": 3, "cpu_seconds": 3,
             "file_bytes": 1048576, "workspace_bytes": 4194304,
             "memory_bytes": 536870912, "concurrency": 2, "isolation": "process",
-            "max_processes": 64, "cpu_quota": 1}
+            "max_processes": 64, "cpu_quota": 1, "total_seconds": 300}
 TRANSITIONS = {
-    "pending": {"running"}, "running": {"interrupted", "failed", "verifying"},
-    "interrupted": {"running"}, "failed": {"running"},
-    "verifying": {"running", "succeeded", "rejected"}, "rejected": set(), "succeeded": set(),
+    "pending": {"running", "cancelled"}, "running": {"interrupted", "failed", "verifying", "cancelled", "timed_out"},
+    "interrupted": {"running", "cancelled"}, "failed": {"running", "cancelled"},
+    "verifying": {"running", "failed", "succeeded", "rejected", "cancelled", "timed_out"},
+    "rejected": set(), "succeeded": set(), "cancelled": set(), "timed_out": set(),
 }
 
 
@@ -72,6 +73,10 @@ class Runtime:
             CREATE TABLE IF NOT EXISTS events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, timestamp REAL,
                 kind TEXT, payload TEXT);
+            CREATE TABLE IF NOT EXISTS task_controls (
+                task_id TEXT PRIMARY KEY, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                deadline_at REAL, attempts INTEGER NOT NULL DEFAULT 0,
+                retryable INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS usage (
                 task_id TEXT PRIMARY KEY, tokens INTEGER, cost REAL, evidence TEXT);
             CREATE TABLE IF NOT EXISTS checkpoints (
@@ -100,7 +105,7 @@ class Runtime:
         if set(policy) != set(DEFAULTS) or any(
             type(value) not in (int, float) or not math.isfinite(value) or value <= 0
             for name, value in policy.items() if name != "isolation"
-        ) or any(type(policy[name]) is not int for name in policy if name not in {"timeout_seconds", "isolation", "cpu_quota"}):
+        ) or any(type(policy[name]) is not int for name in policy if name not in {"timeout_seconds", "isolation", "cpu_quota", "total_seconds"}):
             raise ValueError("Invalid resource limits")
         if policy["isolation"] not in {"process", "bubblewrap", "docker"}:
             raise ValueError("Unknown isolation mode")
@@ -159,6 +164,8 @@ class Runtime:
                 raise ValueError("Idempotency key already bound to a different task")
             if not old:
                 self.db.execute("INSERT INTO tasks(id,spec,state) VALUES (?,?,'pending')", (task_id, spec))
+                self.db.execute("INSERT INTO task_controls(task_id,deadline_at) VALUES (?,?)",
+                                (task_id, time.time() + policy["total_seconds"]))
                 self.event(task_id, "submitted", {"recipe": list(recipe)})
         return task_id
 
@@ -183,7 +190,7 @@ class Runtime:
             except BlockingIOError:
                 candidate.close()
         if slot is None:
-            raise RuntimeError("Tool concurrency limit reached")
+            raise ToolCapacityError("Tool concurrency limit reached")
         try:
             yield
         finally:
@@ -197,6 +204,50 @@ class Runtime:
             if path.is_file():
                 result[str(path.relative_to(folder))] = hashlib.sha256(path.read_bytes()).hexdigest()
         return result
+
+    def status(self, key=None):
+        query = ("SELECT t.id,t.state,t.next_step,t.calls,t.seconds,t.recoveries,t.error,"
+                 "c.cancel_requested,c.deadline_at,c.attempts,c.retryable,t.spec FROM tasks t "
+                 "LEFT JOIN task_controls c ON c.task_id=t.id")
+        has_effects = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='external_effects'").fetchone()
+        def public(row):
+            result = dict(row)
+            result["total_steps"] = len(json.loads(result.pop("spec"))["recipe"])
+            result["external_operations"] = (
+                [dict(effect) for effect in self.db.execute(
+                    "SELECT step,operation,state FROM external_effects WHERE task_id=? ORDER BY step",
+                    (result["id"],))] if has_effects else [])
+            return result
+        if key is None:
+            return [public(row) for row in self.db.execute(query + " ORDER BY t.rowid")]
+        row = self.db.execute(query + " WHERE t.id=?", (key,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown task")
+        return public(row)
+
+    def cancel(self, key):
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute("SELECT state FROM tasks WHERE id=?", (key,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown task")
+            if row["state"] in {"succeeded", "rejected", "cancelled", "timed_out"}:
+                return self.status(key)
+            self.db.execute("INSERT OR IGNORE INTO task_controls(task_id) VALUES (?)", (key,))
+            self.db.execute("UPDATE task_controls SET cancel_requested=1 WHERE task_id=?", (key,))
+            self.event(key, "cancel_requested", {})
+            if row["state"] in {"pending", "failed", "interrupted"}:
+                self.transition(key, "cancelled")
+        return self.status(key)
+
+    def guard(self, key):
+        control = self.db.execute("SELECT * FROM task_controls WHERE task_id=?", (key,)).fetchone()
+        if control is not None:
+            if control["cancel_requested"]:
+                raise TaskCancelled("Task cancellation requested")
+            if control["deadline_at"] is not None and time.time() >= control["deadline_at"]:
+                raise TaskDeadlineExceeded("Task total wall-time budget exhausted")
 
     def run(self, key, *, interrupt_after=None):
         if len(key) != 64 or any(character not in "0123456789abcdef" for character in key):
@@ -213,12 +264,20 @@ class Runtime:
                                       json.loads(event["payload"])["name"]])
             root = self.root / key
             root.mkdir(exist_ok=True)
+            if row["state"] in {"cancelled", "timed_out"}:
+                return dict(row)
             if row["state"] in {"succeeded", "rejected"}:
                 self.check_checkpoint(key, root, row["next_step"])
                 return dict(row)
             recovering = row["state"] != "pending"
             with self.db:
-                if row["state"] == "running":
+                self.db.execute("BEGIN IMMEDIATE")
+                current = self.db.execute("SELECT state FROM tasks WHERE id=?", (key,)).fetchone()[0]
+                if current == "cancelled":
+                    return dict(self.db.execute("SELECT * FROM tasks WHERE id=?", (key,)).fetchone())
+                self.db.execute("INSERT OR IGNORE INTO task_controls(task_id) VALUES (?)", (key,))
+                self.db.execute("UPDATE task_controls SET attempts=attempts+1 WHERE task_id=?", (key,))
+                if current == "running":
                     self.transition(key, "interrupted")
                 self.transition(key, "running")
                 if recovering:
@@ -226,16 +285,22 @@ class Runtime:
                     self.event(key, "resume", {"step": row["next_step"]})
             started = time.monotonic()
             try:
+                self.guard(key)
                 self.execute_steps(key, root, row, spec, interrupt_after)
             except Exception as error:
                 with self.db:
                     state = self.db.execute("SELECT state FROM tasks WHERE id=?", (key,)).fetchone()[0]
                     if state in {"running", "verifying"}:
-                        if state == "verifying":
-                            self.transition(key, "running")
-                        self.transition(key, "failed")
+                        target = ("cancelled" if isinstance(error, TaskCancelled) else
+                                  "timed_out" if isinstance(error, TaskDeadlineExceeded) else "failed")
+                        self.transition(key, target)
+                    retryable = isinstance(error, (OSError, subprocess.TimeoutExpired,
+                                                   ToolCapacityError, GatewayError))
+                    self.db.execute("UPDATE task_controls SET retryable=? WHERE task_id=?",
+                                    (int(retryable), key))
                     self.db.execute("UPDATE tasks SET error=? WHERE id=?", (str(error), key))
-                    self.event(key, "error", {"message": str(error)})
+                    self.event(key, "error", {"message": str(error), "type": type(error).__name__,
+                                              "retryable": retryable})
             finally:
                 with self.db:
                     self.db.execute("UPDATE tasks SET seconds=seconds+? WHERE id=?",
@@ -268,6 +333,7 @@ class Runtime:
                                 (key, 0, canonical(self.snapshot(folder))))
         checkpoint = self.check_checkpoint(key, root, step)
         for index in range(step, len(spec["recipe"])):
+            self.guard(key)
             if interrupt_after is not None and index == interrupt_after:
                 with self.db:
                     self.transition(key, "interrupted")
@@ -289,7 +355,7 @@ class Runtime:
                     self.event(key, "tool_started", {"step": index, "tool": tool})
                 if tool == "http_write":
                     receipt = execute_external(self, key, index,
-                                               json.loads((staging / "input.txt").read_text()), limits)
+                                               json.loads((staging / "input.txt").read_text()), limits, lambda: self.guard(key))
                     (staging / "output.txt").write_text(canonical(receipt) + "\n")
                 else:
                     command = [sys.executable, "-I", str(Path(__file__).with_name("sandbox_worker.py")),
@@ -304,11 +370,8 @@ class Runtime:
                                                    env={"PATH": os.defpath, "LC_ALL": "C"},
                                                    start_new_session=True)
                         try:
-                            code = process.wait(timeout=limits["timeout_seconds"])
-                        except BaseException:
-                            os.killpg(process.pid, signal.SIGKILL)
-                            process.wait()
-                            raise
+                            code = wait_process(process, limits["timeout_seconds"],
+                                                check=lambda: self.guard(key))
                         finally:
                             remove_container(command)
                     if code:
@@ -322,11 +385,14 @@ class Runtime:
                 shutil.rmtree(final)
             staging.rename(final)
             with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                self.guard(key)
                 self.db.execute("INSERT INTO checkpoints VALUES (?,?,?)", (key, index + 1, manifest))
                 self.db.execute("UPDATE tasks SET next_step=?,error=NULL WHERE id=?", (index + 1, key))
                 self.event(key, "checkpoint", {"step": index + 1, "manifest": json.loads(manifest)})
             checkpoint = final
         with self.db:
+            self.guard(key)
             self.transition(key, "verifying")
         for rule in spec["rules"]:
             if rule["kind"] == "tests" and self.snapshot(Path(rule["suite"])) != rule["suite_manifest"]:
@@ -334,7 +400,8 @@ class Runtime:
         before = self.snapshot(checkpoint)
         with self.tool_slot(limits["concurrency"]):
             checks = [verify(checkpoint, {**rule, "_limits": limits,
-                                         "_allowed_origins": self.permissions["origins"]})
+                                         "_allowed_origins": self.permissions["origins"],
+                                         "_control_check": lambda: self.guard(key)})
                       for rule in spec["rules"]]
         for rule in spec["rules"]:
             if rule["kind"] == "tests" and self.snapshot(Path(rule["suite"])) != rule["suite_manifest"]:
@@ -350,6 +417,8 @@ class Runtime:
         finally:
             memory.close()
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.guard(key)
             self.db.execute("UPDATE tasks SET verification=? WHERE id=?", (canonical(checks), key))
             self.transition(key, "succeeded" if passed else "rejected")
             self.db.execute("UPDATE tasks SET error=NULL WHERE id=?", (key,))
@@ -366,12 +435,18 @@ def main():
     plan.add_argument("plan", type=Path)
     plan.add_argument("--model")
     plan.add_argument("--token-price", type=float)
+    enqueue = sub.add_parser("enqueue")
+    enqueue.add_argument("plan", type=Path)
     submit = sub.add_parser("submit")
     submit.add_argument("plan", type=Path)
     memory = sub.add_parser("memory")
     memory.add_argument("subject")
     memory.add_argument("--require-calibrated", action="store_true")
     memory.add_argument("--min-confidence", type=float, default=0.5)
+    status = sub.add_parser("status")
+    status.add_argument("task_id", nargs="?")
+    cancel = sub.add_parser("cancel")
+    cancel.add_argument("task_id")
     events = sub.add_parser("events")
     events.add_argument("task_id")
     resume = sub.add_parser("resume")
@@ -383,6 +458,10 @@ def main():
     try:
         if args.action == "init":
             print(canonical(runtime.permissions))
+            return
+        if args.action in {"status", "cancel"}:
+            result = runtime.status(args.task_id) if args.action == "status" else runtime.cancel(args.task_id)
+            print(json.dumps(result, indent=2))
             return
         if args.action == "memory":
             memory = GovernedMemory(runtime.root / "memory.sqlite")
@@ -399,10 +478,13 @@ def main():
                                  plan["rules"], model=args.model, limits=plan.get("limits"),
                                  token_price=args.token_price)
             result = runtime.run(key)
-        elif args.action == "submit":
+        elif args.action in {"submit", "enqueue"}:
             plan = json.loads(args.plan.read_text())
             key = runtime.submit(plan["idempotency_key"], plan["source"], plan["recipe"],
                                  plan["rules"], limits=plan.get("limits"))
+            if args.action == "enqueue":
+                print(json.dumps(runtime.status(key), indent=2))
+                return
             result = runtime.run(key)
         elif args.action == "events":
             print(json.dumps([dict(row) for row in runtime.db.execute(
