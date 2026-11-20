@@ -19,9 +19,25 @@ def export(root, labels, output, *, calibrate_memory=False, tool_cost=None):
         raise ValueError("Runtime database does not exist")
     if not isinstance(labels, dict) or not labels:
         raise ValueError("Provide a task-ID to independent success-label mapping")
+    output = Path(output)
+    if output.exists():
+        raise FileExistsError(output)
     runtime = Runtime(root)
+    observations = []
     try:
-        rows = [export_record(runtime, key, success=value) for key, value in labels.items()]
+        with runtime.db:
+            runtime.db.execute("BEGIN")
+            rows = [export_record(runtime, key, success=value) for key, value in labels.items()]
+            if calibrate_memory:
+                for key, label in labels.items():
+                    task = runtime.db.execute("SELECT spec,state FROM tasks WHERE id=?", (key,)).fetchone()
+                    spec = json.loads(task["spec"])
+                    if "memory_subject" in spec and task["state"] in {"succeeded", "rejected"}:
+                        observations.append({
+                            "subject": spec["memory_subject"],
+                            "value": {"recipe": spec["recipe"], "passed": task["state"] == "succeeded"},
+                            "observation_id": key, "success": label,
+                            "provenance": {"source": "independent_runtime_labels", "task_id": key}})
     finally:
         runtime.close()
     if tool_cost is not None:
@@ -31,21 +47,12 @@ def export(root, labels, output, *, calibrate_memory=False, tool_cost=None):
             row["cost"] = (row["model_cost"] + row["tool_cost"]
                            if row["model_cost"] is not None else None)
             row["cost_scope"] = "observed_model_usage_plus_declared_per_attempt_tool_price"
-    if calibrate_memory:
-        runtime = Runtime(root)
+    if observations:
         memory = GovernedMemory(Path(root) / "memory.sqlite")
         try:
-            for key, label in labels.items():
-                task = runtime.db.execute("SELECT spec,state FROM tasks WHERE id=?", (key,)).fetchone()
-                spec = json.loads(task["spec"])
-                if "memory_subject" in spec and task["state"] in {"succeeded", "rejected"}:
-                    memory.observe(
-                        spec["memory_subject"], {"recipe": spec["recipe"], "passed": task["state"] == "succeeded"},
-                        observation_id=key, success=label,
-                        provenance={"source": "independent_runtime_labels", "task_id": key})
+            memory.observe_many(observations)
         finally:
             memory.close()
-            runtime.close()
     summary = summarize(rows)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)

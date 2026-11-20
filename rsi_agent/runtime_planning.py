@@ -73,14 +73,19 @@ def submit(runtime, key, source, family, rules, *, model=None, limits=None, toke
                 runtime.db.execute("INSERT OR REPLACE INTO planning VALUES (?,?,'resolved',?)",
                                    (task_id, binding, canonical(decision)))
         submitted = runtime.submit(key, source, decision["recipe"], rules,
-                                   limits=limits, memory_subject=subject)
-        with runtime.db:
-            runtime.db.execute("INSERT OR IGNORE INTO usage VALUES (?,?,?,?)",
-                               (submitted, decision["tokens"], decision["cost"], canonical(decision["evidence"])))
+                                   limits=limits, memory_subject=subject, usage=decision)
         return submitted
 
 
 def export_record(runtime, task_id, *, success):
+    if runtime.db.in_transaction:
+        return _export_record(runtime, task_id, success=success)
+    with runtime.db:
+        runtime.db.execute("BEGIN")
+        return _export_record(runtime, task_id, success=success)
+
+
+def _export_record(runtime, task_id, *, success):
     if type(success) is not bool:
         raise ValueError("An independent boolean success label is required")
     task = runtime.db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -102,5 +107,5 @@ def export_record(runtime, task_id, *, success):
             "attempts": control["attempts"] if control else None, "verifier_passed": verdict,
             "tool_calls": task["calls"], "seconds": max(0, last - first),
             "active_seconds": task["seconds"], "recoveries": task["recoveries"],
-            "tokens": usage["tokens"] if usage else 0, "cost": usage["cost"] if usage else None,
+            "tokens": usage["tokens"] if usage else (None if "memory_subject" in json.loads(task["spec"]) else 0), "cost": usage["cost"] if usage else None,
             "latency_scope": "submission_to_last_terminal_event_including_recovery_downtime"}

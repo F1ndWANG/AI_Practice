@@ -16,36 +16,40 @@ def drain(runtime, *, max_attempts=3, retry_delay=0.25):
     if type(retry_delay) not in (int, float) or not math.isfinite(retry_delay) or retry_delay < 0:
         raise ValueError("Retry delay must be finite and nonnegative")
     results = []
-    # One snapshot of the queue, so the command always completes.
     for item in runtime.status():
-        key = item["id"]
-        status = item
-        if status["state"] in {"succeeded", "rejected", "cancelled", "timed_out"}:
-            continue
-        while (status["attempts"] or 0) < max_attempts:
-            if status["state"] == "failed" and not status["retryable"]:
-                break
-            try:
-                runtime.run(key)
-            except RuntimeError as error:
-                if str(error) != "Task is already executing":
-                    raise
-                break
-            status = runtime.status(key)
-            if status["state"] != "failed" or not status["retryable"]:
-                break
-            if status["attempts"] >= max_attempts:
-                break
-            until = time.monotonic() + retry_delay * 2 ** (status["attempts"] - 1)
-            while time.monotonic() < until:
-                try:
-                    runtime.guard(key)
-                except (TaskCancelled, TaskDeadlineExceeded):
-                    # run applies the terminal state under the task lock.
-                    break
-                time.sleep(min(0.05, max(0, until - time.monotonic())))
-        results.append(runtime.status(key))
+        if item["state"] not in {"succeeded", "rejected", "cancelled", "timed_out"}:
+            results.append(run_one(runtime, item["id"], max_attempts=max_attempts, retry_delay=retry_delay))
     return {"tasks": results, "passed": all(row["state"] == "succeeded" for row in results)}
+
+
+def run_one(runtime, key, *, max_attempts=3, retry_delay=0.25):
+    if type(max_attempts) is not int or max_attempts < 1:
+        raise ValueError("Retry limit must be a positive integer")
+    if type(retry_delay) not in (int, float) or not math.isfinite(retry_delay) or retry_delay < 0:
+        raise ValueError("Retry delay must be finite and nonnegative")
+    status = runtime.status(key)
+    if status["state"] in {"succeeded", "rejected", "cancelled", "timed_out"}:
+        return status
+    while (status["attempts"] or 0) < max_attempts:
+        if status["state"] == "failed" and not status["retryable"]:
+            break
+        try:
+            runtime.run(key, max_attempts=max_attempts)
+        except RuntimeError as error:
+            if str(error) != "Task is already executing":
+                raise
+            break
+        status = runtime.status(key)
+        if status["state"] != "failed" or not status["retryable"] or status["attempts"] >= max_attempts:
+            break
+        until = time.monotonic() + retry_delay * 2 ** min(status["attempts"] - 1, 10)
+        while time.monotonic() < until:
+            try:
+                runtime.guard(key)
+            except (TaskCancelled, TaskDeadlineExceeded):
+                break
+            time.sleep(min(0.05, max(0, until - time.monotonic())))
+    return runtime.status(key)
 
 
 def main():

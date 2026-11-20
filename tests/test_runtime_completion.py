@@ -93,6 +93,7 @@ class ExternalServiceTests(unittest.TestCase):
     def setUp(self):
         self.receipts = {}
         self.puts = 0
+        self.traceparents = []
         self.lose_response = True
         fixture = self
 
@@ -105,6 +106,7 @@ class ExternalServiceTests(unittest.TestCase):
                     self.reply(fixture.receipts[operation])
 
             def do_PUT(self):
+                fixture.traceparents.append(self.headers.get("traceparent"))
                 raw = self.rfile.read(int(self.headers["Content-Length"]))
                 operation = self.path.rsplit("/", 1)[-1]
                 digest = hashlib.sha256(raw).hexdigest()
@@ -165,6 +167,10 @@ class ExternalServiceTests(unittest.TestCase):
             self.assertEqual(result["state"], "succeeded", result["error"])
             self.assertEqual(self.puts, 1)
             self.assertEqual(result["recoveries"], 1)
+            from rsi_agent.runtime_traces import build
+            trace = build(runtime, dict(runtime.db.execute("SELECT * FROM tasks WHERE id=?", (key,)).fetchone()))
+            contexts = {span["traceparent"] for span in trace["spans"]}
+            self.assertTrue(self.traceparents and all(value in contexts for value in self.traceparents))
             self.assertEqual(runtime.db.execute("SELECT state FROM external_effects").fetchone()[0], "confirmed")
             runtime.close()
 

@@ -8,6 +8,7 @@ from urllib.request import ProxyHandler, Request, build_opener
 
 from .live_verifier import NoRedirect, origin
 from .execution_control import json_process
+from .runtime_traces import traceparent
 
 
 class GatewayError(RuntimeError):
@@ -53,7 +54,10 @@ def execute(runtime, task_id, index, request, limits, check=None):
             runtime.event(task_id, "external_intent", {"step": index, "operation": operation,
                                                       "request_sha256": digest})
     try:
-        payload = {"url": endpoint, "body": body.decode(), "operation": operation,
+        event = runtime.db.execute(
+            "SELECT max(seq) FROM events WHERE task_id=? AND kind='tool_started'", (task_id,)).fetchone()[0]
+        context = traceparent(task_id, f"tool:{event}" if event is not None else "task")
+        payload = {"traceparent": context, "url": endpoint, "body": body.decode(), "operation": operation,
                    "digest": digest, "timeout": limits["timeout_seconds"],
                    "max_bytes": limits["file_bytes"]}
         try:
@@ -83,7 +87,7 @@ def main():
     request = json.load(sys.stdin)
     opener = build_opener(ProxyHandler({}), NoRedirect())
     headers = {"Idempotency-Key": request["operation"], "X-Request-SHA256": request["digest"],
-               "Content-Type": "application/json"}
+               "Content-Type": "application/json", "traceparent": request["traceparent"]}
     try:
         receipt = response_json(opener, Request(request["url"], headers=headers),
                                 request["timeout"], request["max_bytes"])

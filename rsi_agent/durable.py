@@ -23,6 +23,7 @@ from .execution_control import (TaskCancelled, TaskDeadlineExceeded, ToolCapacit
 from .live_verifier import origin
 from .sandbox_worker import isolate, container_image, remove_container
 
+VERIFIERS = {"file", "text", "data", "tests", "page", "page_live", "browser", "paper"}
 TOOLS = {**LOCAL_TOOLS, "http_write": ("runtime-gateway", "http_write")}
 
 DEFAULTS = {"max_calls": 6, "timeout_seconds": 3, "cpu_seconds": 3,
@@ -65,6 +66,8 @@ class Runtime:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, spec TEXT NOT NULL, state TEXT NOT NULL,
                 next_step INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0,
@@ -82,6 +85,10 @@ class Runtime:
             CREATE TABLE IF NOT EXISTS checkpoints (
                 task_id TEXT, step INTEGER, manifest TEXT, PRIMARY KEY(task_id,step));
         """)
+        legacy = self.root / "concurrency.json"
+        if legacy.is_file():
+            self.db.execute("INSERT OR IGNORE INTO runtime_settings VALUES ('concurrency',?)",
+                            (canonical(json.loads(legacy.read_text())),))
         self.db.commit()
 
     def close(self):
@@ -98,9 +105,17 @@ class Runtime:
         self.db.execute("UPDATE tasks SET state=? WHERE id=?", (state, key))
         self.event(key, "state", {"from": current, "to": state})
 
-    def submit(self, key, source, recipe, rules, *, limits=None, memory_subject=None):
+    def submit(self, key, source, recipe, rules, *, limits=None, memory_subject=None, usage=None):
         if not isinstance(key, str) or not key:
             raise ValueError("A nonempty idempotency key is required")
+        if usage is not None:
+            if not isinstance(usage, dict):
+                raise ValueError("Usage must be a record")
+            tokens, cost = usage.get("tokens"), usage.get("cost")
+            if (tokens is not None and (type(tokens) is not int or tokens < 0)
+                    or cost is not None and (type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0)
+                    or not isinstance(usage.get("evidence"), dict)):
+                raise ValueError("Usage requires valid token, cost and evidence records")
         policy = {**DEFAULTS, **(limits or {})}
         if set(policy) != set(DEFAULTS) or any(
             type(value) not in (int, float) or not math.isfinite(value) or value <= 0
@@ -110,10 +125,12 @@ class Runtime:
         if policy["isolation"] not in {"process", "bubblewrap", "docker"}:
             raise ValueError("Unknown isolation mode")
         isolate(["true"], self.root, policy["isolation"], policy)
-        if not recipe or any(tool not in TOOLS or tool not in self.permissions["tools"] for tool in recipe):
+        if (not isinstance(recipe, (list, tuple)) or not recipe
+                or any(not isinstance(tool, str) or tool not in TOOLS
+                       or tool not in self.permissions["tools"] for tool in recipe)):
             raise ValueError("Recipe must contain registered tools")
-        if not rules or any(rule.get("kind") not in
-                            {"file", "text", "data", "tests", "page", "page_live", "browser", "paper"} for rule in rules):
+        if (not isinstance(rules, (list, tuple)) or not rules
+                or any(not isinstance(rule, dict) or rule.get("kind") not in VERIFIERS for rule in rules)):
             raise ValueError("Provide objective verification rules")
         if "http_write" in recipe:
             external = json.loads(source)
@@ -122,14 +139,6 @@ class Runtime:
                 raise ValueError("External write requires an approved origin and a payload")
         if len(source.encode()) > policy["workspace_bytes"]:
             raise ValueError("Input exceeds workspace budget")
-        with (self.root / "policy.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            policy_file = self.root / "concurrency.json"
-            if policy_file.exists():
-                if json.loads(policy_file.read_text()) != policy["concurrency"]:
-                    raise ValueError("Concurrency must match this runtime's persisted limit")
-            else:
-                policy_file.write_text(json.dumps(policy["concurrency"]))
         rules = json.loads(canonical(rules))
         for rule in rules:
             if rule["kind"] in {"page_live", "browser"}:
@@ -153,6 +162,13 @@ class Runtime:
             spec = canonical(specification)
         task_id = hashlib.sha256(key.encode()).hexdigest()
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            configured = self.db.execute(
+                "SELECT value FROM runtime_settings WHERE name='concurrency'").fetchone()
+            if configured and json.loads(configured["value"]) != policy["concurrency"]:
+                raise ValueError("Concurrency must match this runtime's persisted limit")
+            self.db.execute("INSERT OR IGNORE INTO runtime_settings VALUES ('concurrency',?)",
+                            (canonical(policy["concurrency"]),))
             old = self.db.execute("SELECT spec FROM tasks WHERE id=?", (task_id,)).fetchone()
             comparison = json.loads(spec)
             if old:
@@ -167,6 +183,13 @@ class Runtime:
                 self.db.execute("INSERT INTO task_controls(task_id,deadline_at) VALUES (?,?)",
                                 (task_id, time.time() + policy["total_seconds"]))
                 self.event(task_id, "submitted", {"recipe": list(recipe)})
+            if usage is not None:
+                ledger = (usage.get("tokens"), usage.get("cost"), canonical(usage["evidence"]))
+                old_usage = self.db.execute(
+                    "SELECT tokens,cost,evidence FROM usage WHERE task_id=?", (task_id,)).fetchone()
+                if old_usage and tuple(old_usage) != ledger:
+                    raise ValueError("Task usage is already bound to different records")
+                self.db.execute("INSERT OR IGNORE INTO usage VALUES (?,?,?,?)", (task_id, *ledger))
         return task_id
 
     @contextmanager
@@ -197,6 +220,8 @@ class Runtime:
             slot.close()
 
     def snapshot(self, folder):
+        if not folder.is_dir():
+            raise ValueError("Checkpoint directory is missing")
         result = {}
         for path in sorted(folder.rglob("*")):
             if path.is_symlink():
@@ -249,7 +274,9 @@ class Runtime:
             if control["deadline_at"] is not None and time.time() >= control["deadline_at"]:
                 raise TaskDeadlineExceeded("Task total wall-time budget exhausted")
 
-    def run(self, key, *, interrupt_after=None):
+    def run(self, key, *, interrupt_after=None, max_attempts=None):
+        if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+            raise ValueError("Attempt limit must be a positive integer")
         if len(key) != 64 or any(character not in "0123456789abcdef" for character in key):
             raise ValueError("Invalid task ID")
         with self.task_lock(key):
@@ -276,6 +303,10 @@ class Runtime:
                 if current == "cancelled":
                     return dict(self.db.execute("SELECT * FROM tasks WHERE id=?", (key,)).fetchone())
                 self.db.execute("INSERT OR IGNORE INTO task_controls(task_id) VALUES (?)", (key,))
+                attempts = self.db.execute(
+                    "SELECT attempts FROM task_controls WHERE task_id=?", (key,)).fetchone()[0]
+                if max_attempts is not None and attempts >= max_attempts:
+                    return dict(self.db.execute("SELECT * FROM tasks WHERE id=?", (key,)).fetchone())
                 self.db.execute("UPDATE task_controls SET attempts=attempts+1 WHERE task_id=?", (key,))
                 if current == "running":
                     self.transition(key, "interrupted")

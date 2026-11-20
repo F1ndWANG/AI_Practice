@@ -278,3 +278,48 @@ enqueue 只提交固定配方任务，submit 仍提交后立即执行。status �
 task_worker 处理启动时队列快照，完成后退出。针对 OS 错误、单工具超时、工具容量暂不可用和网关请求失败执行有界重试与指数退避。幂等协议不匹配、工具命令变更、预算耗尽等错误停止自动重试。max-attempts 按数据库中累计执行次数判断，重启 worker 不清零；工具调用预算同样跨重试累计。其他进程已持有任务锁时跳过该任务并在报告中保留状态。worker 不重新调用模型规划。
 
 指标导出新增取消数、总预算超时数、平均尝试数及生命周期覆盖率。取消、超时或验证前执行失败的任务，verifier_passed 保留为 null，避免将未给出判定的任务计入验证器误判。
+
+
+### 可恢复 DAG 工作流
+
+```bash
+python -m rsi_agent.workflows runs/graph submit sum-graph examples/runtime_workflow.json
+python -m rsi_agent.workflows runs/graph run WORKFLOW_ID --workers 2 --max-attempts 3
+python -m rsi_agent.workflows runs/graph status WORKFLOW_ID
+```
+
+示例并行计算两个分支，再将检查点中的输出汇合为下游输入。工作流结构使用 Python graphlib 校验环与缺失依赖，通过 ThreadPoolExecutor 调度就绪节点。每个节点复用现有 Runtime 的权限、预算、检查点、取消及重试。工作流与节点绑定写入 SQLite，同一工作流键绑定同一份图，每个节点派生固定任务键。
+
+节点可以指定 source，或使用 inputs 引用上游节点的检查点文件，默认路径为 output.txt，多份输入按 separator 连接。inputs 自动形成依赖，depends_on 可增加执行屏障。文件引用会重新检查检查点、读取预算及内容哈希，输入无法越过已确认的节点产物。成功节点恢复时只核对产物，工具调用不重复；中断节点续接原检查点，失败依赖阻止下游执行。--workers 控制图调度并发，工具并发仍由 Runtime 策略约束。
+
+本实现按就绪波次推进，运行命令处理完当前可执行节点后返回 succeeded、failed 或 incomplete。正在被其他执行进程持有的节点、主动中断的节点会使图保持 incomplete，可使用同一工作流 ID 再次运行。它面向共享本地文件系统上的多进程执行。
+
+### OpenTelemetry 与事务事件导出
+
+无需额外依赖即可从已提交事件导出带 W3C Trace Context 的 JSON：
+
+```bash
+python -m rsi_agent.runtime_traces runs/graph --output runs/graph-traces.json
+```
+
+安装可选 SDK 后，可以通过 OTLP/HTTP 发送给 OpenTelemetry Collector：
+
+```bash
+python -m pip install '.[telemetry]'
+python -m rsi_agent.runtime_traces runs/graph \
+  --otlp-endpoint http://127.0.0.1:4318/v1/traces
+```
+
+链路包含任务、执行尝试、工具和验证阶段，时间来自持久化事件；模型规划起点在有用量证据时纳入任务跨度。Span ID 由任务与事件标识确定，恢复后的相同事件保持相同标识。外部网关同时发送 traceparent，请求可与本地工具 span 关联。导出通过公开 TracerProvider、IdGenerator 和 SpanProcessor 接口重放事件，再使用官方 OTLP exporter 发送。
+
+事件日志作为事务 outbox 的来源，收到传输确认后才更新 trace_deliveries。失败或导出进程在确认前退出时可以重发，语义为至少一次投递，接收方应处理相同 Span ID。导出只处理终态任务，任务重试后的新版本会重新发送。进程崩溃前无法观测的工具结束时间使用恢复事件界定，并标记 observed_event_bounds；该跨度包含可能的停机等待。
+
+JSON 导出保留固定快照，同一文件路径已含不同内容时会失败，新增任务后可选择新的输出文件。链路属性提供任务 ID、步骤、调用数与结果。它与现有事件日志共同用于故障定位。
+
+### 一致性修复
+
+任务、控制记录、提交事件及规划用量现在在同一个 SQLite 写事务中提交。相同幂等键并发提交被串行化；已有用量记录绑定不同内容时会失败。历史规划任务缺少用量时保留未知，避免当作零 Token。
+
+队列的尝试上限在获得任务锁后、增加计数前再次检查，防止其他 worker 已用完次数后，持有旧队列快照的 worker 再次执行。统计导出在同一数据库读快照中读取任务、事件、控制和用量。独立标注按批次事务导入，任意冲突都会回滚该批次新增记录。检查点目录缺失会直接报错。
+
+回归用例覆盖并发相同键提交、写入用量时故障回滚、两个 worker 的旧快照交错、导出期间另一 worker 重试，以及冲突标注的整批回滚。OpenTelemetry 集成用例由本地 HTTP 接收器解码真实 OTLP protobuf，验证 Span ID 与持久化事件一致。

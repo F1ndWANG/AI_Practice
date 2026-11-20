@@ -30,24 +30,35 @@ class GovernedMemory:
         self.db.commit()
 
     def observe(self, subject, value, *, observation_id, success, provenance):
-        if (type(success) is not bool or not observation_id
-                or not isinstance(provenance, dict) or not provenance.get("source")):
-            raise ValueError("Calibration requires independent labels, IDs and source provenance")
-        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha256(encoded.encode()).hexdigest()
-        if not self.db.execute("SELECT 1 FROM governed_memory WHERE subject=? AND digest=?",
-                               (subject, digest)).fetchone():
-            raise ValueError("Cannot calibrate an unknown memory candidate")
+        return self.observe_many([{"subject": subject, "value": value, "observation_id": observation_id,
+                                   "success": success, "provenance": provenance}])[0]
+
+    def observe_many(self, observations):
+        digests = []
         with self.db:
-            old = self.db.execute(
-                "SELECT label,provenance FROM memory_observations WHERE subject=? AND digest=? AND observation_id=?",
-                (subject, digest, observation_id)).fetchone()
-            source = json.dumps(provenance, sort_keys=True)
-            if old is not None and old != (int(success), source):
-                raise ValueError("Observation ID is bound to a different label or provenance")
-            self.db.execute("INSERT OR IGNORE INTO memory_observations VALUES (?,?,?,?,?)",
-                            (subject, digest, observation_id, int(success), source))
-        return digest
+            self.db.execute("BEGIN IMMEDIATE")
+            for observation in observations:
+                subject, value = observation["subject"], observation["value"]
+                observation_id = observation["observation_id"]
+                success, provenance = observation["success"], observation["provenance"]
+                if (type(success) is not bool or not observation_id
+                        or not isinstance(provenance, dict) or not provenance.get("source")):
+                    raise ValueError("Calibration requires independent labels, IDs and source provenance")
+                encoded = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                digest = hashlib.sha256(encoded.encode()).hexdigest()
+                if not self.db.execute("SELECT 1 FROM governed_memory WHERE subject=? AND digest=?",
+                                       (subject, digest)).fetchone():
+                    raise ValueError("Cannot calibrate an unknown memory candidate")
+                old = self.db.execute(
+                    "SELECT label,provenance FROM memory_observations WHERE subject=? AND digest=? AND observation_id=?",
+                    (subject, digest, observation_id)).fetchone()
+                source = json.dumps(provenance, sort_keys=True)
+                if old is not None and old != (int(success), source):
+                    raise ValueError("Observation ID is bound to a different label or provenance")
+                self.db.execute("INSERT OR IGNORE INTO memory_observations VALUES (?,?,?,?,?)",
+                                (subject, digest, observation_id, int(success), source))
+                digests.append(digest)
+        return digests
 
     def close(self):
         self.db.close()
