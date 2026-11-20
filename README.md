@@ -13,6 +13,8 @@
 python3 -m unittest discover -s tests -v
 ```
 
+持久化 Agent Runtime 已提供[检查点恢复、记忆治理、独立验证和系统评测](rsi_agent/README.md#持久化-agent-runtime)，可用 `python -m rsi_agent.durable runs/durable submit examples/runtime_task.json` 运行示例。
+
 ## 一次跑通本地评测
 
 ```bash

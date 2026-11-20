@@ -1,0 +1,50 @@
+{
+  "nodes": [
+    {
+      "id": "left",
+      "source": "1\n2\n",
+      "recipe": [
+        "sum"
+      ],
+      "rules": [
+        {
+          "kind": "text",
+          "expected": "3\n"
+        }
+      ]
+    },
+    {
+      "id": "right",
+      "source": "4\n5\n",
+      "recipe": [
+        "sum"
+      ],
+      "rules": [
+        {
+          "kind": "text",
+          "expected": "9\n"
+        }
+      ]
+    },
+    {
+      "id": "total",
+      "inputs": [
+        {
+          "node": "left"
+        },
+        {
+          "node": "right"
+        }
+      ],
+      "recipe": [
+        "sum"
+      ],
+      "rules": [
+        {
+          "kind": "text",
+          "expected": "12\n"
+        }
+      ]
+    }
+  ]
+}

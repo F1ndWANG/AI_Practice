@@ -46,3 +46,55 @@ jobs:
           name: acceptance-python-${{ matrix.python-version }}
           path: runs/ci-acceptance/bundle/
           if-no-files-found: error
+
+  runtime-isolation:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime isolation dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          python -m pip install .
+      - name: Verify actual namespace isolation and live HTTP state
+        run: |
+          python -m unittest discover -s tests -p test_runtime_sandbox.py -v
+          python -m unittest discover -s tests -p test_runtime_integration.py -v
+
+  runtime-completion:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare browser and container dependencies
+        run: |
+          python -m pip install '.[browser]'
+          python -m playwright install --with-deps chromium
+          docker build -t ai-practice-runtime:local -f examples/runtime.Dockerfile examples
+      - name: Verify external effects, rendered DOM and calibrated memory
+        run: python -m unittest discover -s tests -p test_runtime_completion.py -v
+      - name: Verify actual container quotas and limited host mounts
+        env:
+          AGENT_DOCKER_TESTS: '1'
+        run: python -m unittest discover -s tests -p test_runtime_docker.py -v
+
+
+  runtime-observability:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install OpenTelemetry integration
+        run: python -m pip install '.[telemetry]'
+      - name: Verify workflow recovery, concurrency regressions and real OTLP transport
+        run: |
+          python -m unittest discover -s tests -p test_runtime_consistency.py -v
+          python -m unittest discover -s tests -p test_workflows.py -v
+          python -m unittest discover -s tests -p test_runtime_traces.py -v
