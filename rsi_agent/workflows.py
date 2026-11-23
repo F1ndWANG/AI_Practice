@@ -3,7 +3,9 @@
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from graphlib import TopologicalSorter
 from pathlib import Path
@@ -11,7 +13,7 @@ from pathlib import Path
 from .durable import Runtime, TOOLS, DEFAULTS, VERIFIERS, canonical
 from .governance import artifact
 from .task_worker import run_one
-from .execution_control import TaskCancelled
+from .execution_control import TaskCancelled, TaskDeadlineExceeded
 
 
 FAILED = {"failed", "rejected", "cancelled", "timed_out", "error", "blocked"}
@@ -35,13 +37,18 @@ class Workflows:
 
     def submit(self, key, plan):
         if (not isinstance(key, str) or not key or not isinstance(plan, dict)
-                or set(plan) - {"nodes", "limits"} or not plan.get("nodes")):
+                or set(plan) - {"nodes", "limits"} or not isinstance(plan.get("nodes"), list)
+                or not plan["nodes"]):
             raise ValueError("Workflow requires an idempotency key and nonempty nodes")
         limits = plan.get("limits", {})
-        if (not isinstance(limits, dict) or set(limits) - {"max_tool_calls"}
+        if (not isinstance(limits, dict) or set(limits) - {"max_tool_calls", "total_seconds"}
                 or ("max_tool_calls" in limits and
                     (type(limits["max_tool_calls"]) is not int or limits["max_tool_calls"] < 1))):
             raise ValueError("Workflow max_tool_calls must be a positive integer")
+        if ("total_seconds" in limits and
+                (type(limits["total_seconds"]) not in (int, float)
+                 or not math.isfinite(limits["total_seconds"]) or limits["total_seconds"] <= 0)):
+            raise ValueError("Workflow total_seconds must be finite and positive")
         nodes = plan["nodes"]
         graph = {}
         for node in nodes:
@@ -88,6 +95,9 @@ class Workflows:
             if not old:
                 self.runtime.db.execute("INSERT INTO workflows VALUES (?,?,'pending')", (workflow_id, encoded))
                 self.runtime.db.execute("INSERT INTO workflow_controls(workflow_id) VALUES (?)", (workflow_id,))
+                if "total_seconds" in limits:
+                    self.runtime.db.execute("INSERT INTO workflow_deadlines VALUES (?,?)",
+                                            (workflow_id, time.time() + limits["total_seconds"]))
                 if "max_tool_calls" in limits:
                     self.runtime.db.execute("INSERT INTO workflow_budgets(workflow_id,max_calls) VALUES (?,?)",
                                             (workflow_id, limits["max_tool_calls"]))
@@ -110,8 +120,10 @@ class Workflows:
             state = "cancelling" if any(node["task_state"] in {"running", "verifying"} for node in nodes) else "cancelled"
         budget = self.runtime.db.execute(
             "SELECT max_calls,calls FROM workflow_budgets WHERE workflow_id=?", (workflow_id,)).fetchone()
+        deadline = self.deadline(workflow_id)
         return {"kind": "agent_workflow", "id": workflow_id, "state": state,
                 "passed": state == "succeeded", "cancel_requested": bool(workflow["cancel_requested"]),
+                "deadline_at": deadline, "deadline_expired": deadline is not None and time.time() >= deadline,
                 "tool_budget": ({"limit": budget["max_calls"], "used": budget["calls"],
                                  "remaining": budget["max_calls"] - budget["calls"]} if budget else None),
                 "nodes": nodes}
@@ -122,7 +134,7 @@ class Workflows:
             row = self.runtime.db.execute("SELECT state FROM workflows WHERE id=?", (workflow_id,)).fetchone()
             if row is None:
                 raise ValueError("Unknown workflow")
-            if row["state"] in {"succeeded", "cancelled"}:
+            if row["state"] in {"succeeded", "cancelled", "timed_out"}:
                 return self.status(workflow_id)
             self.runtime.db.execute("UPDATE workflow_controls SET cancel_requested=1 WHERE workflow_id=?",
                                     (workflow_id,))
@@ -145,6 +157,15 @@ class Workflows:
     def cancellation_requested(self, workflow_id):
         return bool(self.runtime.db.execute(
             "SELECT cancel_requested FROM workflow_controls WHERE workflow_id=?", (workflow_id,)).fetchone()[0])
+
+    def deadline(self, workflow_id):
+        row = self.runtime.db.execute(
+            "SELECT deadline_at FROM workflow_deadlines WHERE workflow_id=?", (workflow_id,)).fetchone()
+        return row[0] if row else None
+
+    def expired(self, workflow_id):
+        deadline = self.deadline(workflow_id)
+        return deadline is not None and time.time() >= deadline
 
     def source(self, node, completed):
         if "source" in node:
@@ -184,6 +205,8 @@ class Workflows:
             state, error = result["state"], result["error"]
         except TaskCancelled as problem:
             state, error = "cancelled", str(problem)
+        except TaskDeadlineExceeded as problem:
+            state, error = "timed_out", str(problem)
         except (OSError, ValueError, RuntimeError, sqlite3.Error) as problem:
             state, error = "error", str(problem)
         finally:
@@ -203,6 +226,17 @@ class Workflows:
             raise ValueError("Invalid workflow ID")
         with self.runtime.task_lock("workflow-" + workflow_id):
             status = self.status(workflow_id)
+            if self.expired(workflow_id) and not status["cancel_requested"]:
+                # A crashed orchestrator can leave bound tasks without an active worker.
+                # Their inherited deadlines also apply when resumed by a queue worker.
+                for node in status["nodes"]:
+                    if node["task_state"] in {"pending", "failed", "interrupted", "running", "verifying"}:
+                        try:
+                            self.runtime.run(node["task_id"])
+                        except RuntimeError as error:
+                            if str(error) != "Task is already executing":
+                                raise
+                status = self.status(workflow_id)
             if status["cancel_requested"]:
                 for node in status["nodes"]:
                     if node["task_state"] in {"running", "verifying"}:
@@ -236,7 +270,8 @@ class Workflows:
                 try:
                     while True:
                         cancelled = self.cancellation_requested(workflow_id)
-                        if not cancelled:
+                        expired = self.expired(workflow_id)
+                        if not cancelled and not expired:
                             ready = [key for key in nodes if key not in visited and all(
                                 completed[dependency]["state"] == "succeeded" for dependency in dependencies[key])]
                             for key in ready[:max(0, workers - len(active))]:
@@ -255,7 +290,7 @@ class Workflows:
                             remaining = any(key not in visited and all(
                                 completed[parent]["state"] == "succeeded" for parent in dependencies[key])
                                 for key in nodes)
-                            if not cancelled and remaining:
+                            if not cancelled and not expired and remaining:
                                 continue
                             break
                         finished, _ = wait(active, timeout=0.1, return_when=FIRST_COMPLETED)
@@ -288,6 +323,16 @@ class Workflows:
                 state = self.status(workflow_id)["state"]
             with self.runtime.db:
                 self.runtime.db.execute("BEGIN IMMEDIATE")
+                if self.expired(workflow_id) and state != "succeeded":
+                    for key in nodes:
+                        if key not in visited:
+                            completed[key]["state"], completed[key]["error"] = (
+                                "timed_out", "Workflow total wall-time budget exhausted")
+                    active = self.runtime.db.execute(
+                        "SELECT 1 FROM workflow_nodes n JOIN tasks t ON t.id=n.task_id "
+                        "WHERE n.workflow_id=? AND t.state IN ('running','verifying') LIMIT 1",
+                        (workflow_id,)).fetchone()
+                    state = "timing_out" if active else "timed_out"
                 if self.cancellation_requested(workflow_id):
                     state = self.status(workflow_id)["state"]
                     for key in nodes:
