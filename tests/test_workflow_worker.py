@@ -157,6 +157,8 @@ class WorkflowWorkerTests(unittest.TestCase):
                 result = worker.tick()
             self.assertEqual(result["errors"][0]["id"], bad)
             self.assertEqual(result["workflows"][0]["id"], good)
+            self.assertEqual(worker.tick()["workflows"], [])
+            worker.release(bad, reason="Controller fixture repaired")
             self.assertEqual(worker.tick()["workflows"][0]["state"], "succeeded")
             runtime.close()
 
