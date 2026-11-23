@@ -1,4 +1,5 @@
 {
+  "limits": {"max_tool_calls": 3},
   "nodes": [
     {
       "id": "left",

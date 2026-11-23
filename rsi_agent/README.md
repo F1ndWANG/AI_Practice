@@ -290,6 +290,8 @@ python -m rsi_agent.workflows runs/graph status WORKFLOW_ID
 
 示例并行计算两个分支，再将检查点中的输出汇合为下游输入。工作流结构使用 Python graphlib 校验环与缺失依赖，通过 ThreadPoolExecutor 调度就绪节点。每个节点复用现有 Runtime 的权限、预算、检查点、取消及重试。工作流与节点绑定写入 SQLite，同一工作流键绑定同一份图，每个节点派生固定任务键。
 
+工作流顶层可设置 `"limits": {"max_tool_calls": 3}`，对整张图的工具启动次数设共享上限。所有并行分支和重试在 SQLite 写事务中预留额度，任务计数、共享计数与 tool_started 事件一起提交；达到上限后不启动新工具，节点以不可自动重试的预算错误失败。已预留的启动即使随后失败或进程崩溃也计费，恢复不会返还或重置额度，复用成功检查点不消耗新额度。status 的 tool_budget 返回 limit、used、remaining。该预算绑定不可修改的工作流计划；未配置的旧计划保持原有节点级限额。这里统计注册工具启动，不包含独立验证器、LLM 请求或服务实际账单。
+
 节点可以指定 source，或使用 inputs 引用上游节点的检查点文件，默认路径为 output.txt，多份输入按 separator 连接。inputs 自动形成依赖，depends_on 可增加执行屏障。文件引用会重新检查检查点、读取预算及内容哈希，输入无法越过已确认的节点产物。成功节点恢复时只核对产物，工具调用不重复；中断节点续接原检查点，失败依赖阻止下游执行。--workers 控制图调度并发，工具并发仍由 Runtime 策略约束。
 
 本实现使用 FIRST_COMPLETED 完成通知推进图，分支完成后立即释放满足依赖的下游节点，运行命令处理完当前可执行节点后返回 succeeded、failed 或 incomplete。正在被其他执行进程持有的节点、主动中断的节点会使图保持 incomplete，可使用同一工作流 ID 再次运行。它面向共享本地文件系统上的多进程执行。

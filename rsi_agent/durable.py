@@ -68,6 +68,11 @@ class Runtime:
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS runtime_settings (
                 name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS workflow_budgets (
+                workflow_id TEXT PRIMARY KEY, max_calls INTEGER NOT NULL,
+                calls INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS workflow_budget_tasks (
+                task_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, spec TEXT NOT NULL, state TEXT NOT NULL,
                 next_step INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0,
@@ -172,6 +177,12 @@ class Runtime:
                     raise ValueError("Unknown or conflicting workflow node binding")
                 if binding["cancel_requested"]:
                     raise TaskCancelled("Workflow cancellation requested")
+                self.db.execute("INSERT OR IGNORE INTO workflow_budget_tasks VALUES (?,?)",
+                                (task_id, workflow[0]))
+                owner = self.db.execute(
+                    "SELECT workflow_id FROM workflow_budget_tasks WHERE task_id=?", (task_id,)).fetchone()[0]
+                if owner != workflow[0]:
+                    raise ValueError("Task already belongs to another workflow")
             configured = self.db.execute(
                 "SELECT value FROM runtime_settings WHERE name='concurrency'").fetchone()
             if configured and json.loads(configured["value"]) != policy["concurrency"]:
@@ -399,9 +410,20 @@ class Runtime:
                 raise ValueError("Registered tool implementation changed since submission")
             with self.tool_slot(limits["concurrency"]):
                 with self.db:
+                    self.db.execute("BEGIN IMMEDIATE")
+                    self.guard(key)
                     calls = self.db.execute("SELECT calls FROM tasks WHERE id=?", (key,)).fetchone()[0]
                     if calls >= limits["max_calls"]:
                         raise RuntimeError("Tool call budget exhausted")
+                    budget = self.db.execute(
+                        "SELECT b.workflow_id FROM workflow_budgets b JOIN workflow_budget_tasks a "
+                        "ON a.workflow_id=b.workflow_id WHERE a.task_id=?", (key,)).fetchone()
+                    if budget is not None:
+                        reserved = self.db.execute(
+                            "UPDATE workflow_budgets SET calls=calls+1 WHERE workflow_id=? AND calls<max_calls",
+                            (budget["workflow_id"],))
+                        if reserved.rowcount != 1:
+                            raise RuntimeError("Workflow tool call budget exhausted")
                     self.db.execute("UPDATE tasks SET calls=calls+1 WHERE id=?", (key,))
                     self.event(key, "tool_started", {"step": index, "tool": tool})
                 if tool == "http_write":
