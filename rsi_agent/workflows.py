@@ -34,8 +34,14 @@ class Workflows:
         runtime.db.commit()
 
     def submit(self, key, plan):
-        if not isinstance(key, str) or not key or not isinstance(plan, dict) or set(plan) != {"nodes"} or not plan["nodes"]:
+        if (not isinstance(key, str) or not key or not isinstance(plan, dict)
+                or set(plan) - {"nodes", "limits"} or not plan.get("nodes")):
             raise ValueError("Workflow requires an idempotency key and nonempty nodes")
+        limits = plan.get("limits", {})
+        if (not isinstance(limits, dict) or set(limits) - {"max_tool_calls"}
+                or ("max_tool_calls" in limits and
+                    (type(limits["max_tool_calls"]) is not int or limits["max_tool_calls"] < 1))):
+            raise ValueError("Workflow max_tool_calls must be a positive integer")
         nodes = plan["nodes"]
         graph = {}
         for node in nodes:
@@ -82,6 +88,9 @@ class Workflows:
             if not old:
                 self.runtime.db.execute("INSERT INTO workflows VALUES (?,?,'pending')", (workflow_id, encoded))
                 self.runtime.db.execute("INSERT INTO workflow_controls(workflow_id) VALUES (?)", (workflow_id,))
+                if "max_tool_calls" in limits:
+                    self.runtime.db.execute("INSERT INTO workflow_budgets(workflow_id,max_calls) VALUES (?,?)",
+                                            (workflow_id, limits["max_tool_calls"]))
                 self.runtime.db.executemany("INSERT INTO workflow_nodes VALUES (?,?,NULL,'pending',NULL)",
                                             [(workflow_id, node["id"]) for node in nodes])
         return workflow_id
@@ -99,8 +108,12 @@ class Workflows:
         state = workflow["state"]
         if workflow["cancel_requested"]:
             state = "cancelling" if any(node["task_state"] in {"running", "verifying"} for node in nodes) else "cancelled"
+        budget = self.runtime.db.execute(
+            "SELECT max_calls,calls FROM workflow_budgets WHERE workflow_id=?", (workflow_id,)).fetchone()
         return {"kind": "agent_workflow", "id": workflow_id, "state": state,
                 "passed": state == "succeeded", "cancel_requested": bool(workflow["cancel_requested"]),
+                "tool_budget": ({"limit": budget["max_calls"], "used": budget["calls"],
+                                 "remaining": budget["max_calls"] - budget["calls"]} if budget else None),
                 "nodes": nodes}
 
     def cancel(self, workflow_id):

@@ -28,6 +28,76 @@ def plan():
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_shared_budget_serializes_parallel_branches_and_survives_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Runtime(directory)
+            workflows = Workflows(runtime)
+            graph = plan()
+            graph["limits"] = {"max_tool_calls": 1}
+            # Both independent nodes reach run together; only one tool may launch.
+            graph["nodes"][1]["recipe"] = ["sum"]
+            key = workflows.submit("shared-budget", graph)
+            barrier = threading.Barrier(2)
+            original = Runtime.run
+
+            def synchronize(self, task_id, **kwargs):
+                if self.status(task_id)["state"] == "pending":
+                    barrier.wait(timeout=10)
+                return original(self, task_id, **kwargs)
+
+            with patch.object(Runtime, "run", synchronize):
+                result = workflows.run(key, workers=2)
+            self.assertEqual(result["state"], "failed", result)
+            self.assertEqual(result["tool_budget"], {"limit": 1, "used": 1, "remaining": 0})
+            self.assertEqual(runtime.db.execute("SELECT sum(calls) FROM tasks").fetchone()[0], 1)
+            self.assertEqual(runtime.db.execute(
+                "SELECT count(*) FROM events WHERE kind='tool_started'").fetchone()[0], 1)
+            self.assertTrue(any("Workflow tool call budget exhausted" in (n["error"] or "")
+                                for n in result["nodes"]))
+            runtime.close()
+            runtime = Runtime(directory)
+            workflows = Workflows(runtime)
+            self.assertEqual(workflows.submit("shared-budget", graph), key)
+            self.assertEqual(workflows.run(key)["tool_budget"], result["tool_budget"])
+            self.assertEqual(runtime.db.execute("SELECT sum(calls) FROM tasks").fetchone()[0], 1)
+            runtime.close()
+
+    def test_shared_budget_reservation_rolls_back_with_event_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Runtime(directory)
+            workflows = Workflows(runtime)
+            graph = plan()
+            graph["limits"] = {"max_tool_calls": 4}
+            key = workflows.submit("reservation-rollback", graph)
+            runtime.db.execute("CREATE TRIGGER reject_launch BEFORE INSERT ON events "
+                               "WHEN NEW.kind='tool_started' BEGIN SELECT RAISE(ABORT,'injected'); END")
+            runtime.db.commit()
+            result = workflows.run(key)
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["tool_budget"]["used"], 0)
+            self.assertEqual(runtime.db.execute("SELECT sum(calls) FROM tasks").fetchone()[0], 0)
+            runtime.db.execute("DROP TRIGGER reject_launch")
+            runtime.db.commit()
+            # Explicit operator retry after a nonretryable storage fault reuses the same budget.
+            for row in runtime.db.execute("SELECT id FROM tasks").fetchall():
+                runtime.run(row["id"])
+            result = workflows.run(key)
+            self.assertTrue(result["passed"], result)
+            self.assertEqual(result["tool_budget"], {"limit": 4, "used": 4, "remaining": 0})
+            runtime.close()
+
+    def test_workflow_budget_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Runtime(directory)
+            workflows = Workflows(runtime)
+            for invalid in (0, -1, True, 1.5, "4", None):
+                graph = plan()
+                graph["limits"] = {"max_tool_calls": invalid}
+                with self.assertRaises(ValueError):
+                    workflows.submit("invalid", graph)
+            self.assertEqual(runtime.db.execute("SELECT count(*) FROM workflows").fetchone()[0], 0)
+            runtime.close()
+
     def test_parallel_branches_join_and_completed_graph_is_reused(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Runtime(directory)
@@ -59,7 +129,9 @@ class WorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Runtime(directory)
             workflows = Workflows(runtime)
-            key = workflows.submit("resume", plan())
+            graph = plan()
+            graph["limits"] = {"max_tool_calls": 4}
+            key = workflows.submit("resume", graph)
             original = Runtime.run
             stopped = set()
 
@@ -78,6 +150,7 @@ class WorkflowTests(unittest.TestCase):
             workflows = Workflows(runtime)
             result = workflows.run(key)
             self.assertTrue(result["passed"], result)
+            self.assertEqual(result["tool_budget"], {"limit": 4, "used": 4, "remaining": 0})
             self.assertEqual(runtime.db.execute("SELECT sum(calls) FROM tasks").fetchone()[0], 4)
             first = next(node for node in result["nodes"] if node["node_id"] == "a")
             (Path(directory) / first["task_id"] / "checkpoint-1/output.txt").write_text("changed")
