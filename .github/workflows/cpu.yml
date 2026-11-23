@@ -99,4 +99,5 @@ jobs:
           python -m unittest discover -s tests -p test_workflows.py -v
           python -m unittest discover -s tests -p test_workflow_deadlines.py -v
           python -m unittest discover -s tests -p test_workflow_worker.py -v
+          python -m unittest discover -s tests -p test_workflow_faults.py -v
           python -m unittest discover -s tests -p test_runtime_traces.py -v
