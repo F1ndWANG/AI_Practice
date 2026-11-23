@@ -1,0 +1,20 @@
+{
+  "idempotency_key": "governed-planning-demo",
+  "source": "Pear\napple\nPear\n",
+  "recipe": [
+    "normalize",
+    "sort_normalized"
+  ],
+  "rules": [
+    {
+      "kind": "text",
+      "path": "output.txt",
+      "expected": "apple\npear\n"
+    }
+  ],
+  "limits": {
+    "max_calls": 4,
+    "concurrency": 2
+  },
+  "family": "words"
+}

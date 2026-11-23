@@ -170,6 +170,8 @@ def model_recipe(task, attempts, recalled, model, transport=None):
     tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
     if type(tokens) is not int or tokens < 0:
         tokens = None
+    if transport and isinstance(usage, dict):
+        transport[-1]["usage"] = usage
     try:
         content = reply["choices"][0]["message"]["content"]
         recipe = json.loads(content)["recipe"]

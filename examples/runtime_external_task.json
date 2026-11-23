@@ -1,0 +1,19 @@
+{
+  "idempotency_key": "external-counter-demo",
+  "source": "{\"url\": \"http://127.0.0.1:8085/operations\", \"payload\": {\"name\": \"demo-counter\", \"amount\": 1}}",
+  "recipe": [
+    "http_write"
+  ],
+  "rules": [
+    {
+      "kind": "data",
+      "expected_fields": {
+        "status": "succeeded",
+        "result": {
+          "name": "demo-counter",
+          "value": 1
+        }
+      }
+    }
+  ]
+}
