@@ -73,6 +73,8 @@ class Runtime:
                 calls INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS workflow_budget_tasks (
                 task_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS workflow_deadlines (
+                workflow_id TEXT PRIMARY KEY, deadline_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY, spec TEXT NOT NULL, state TEXT NOT NULL,
                 next_step INTEGER NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0,
@@ -177,6 +179,10 @@ class Runtime:
                     raise ValueError("Unknown or conflicting workflow node binding")
                 if binding["cancel_requested"]:
                     raise TaskCancelled("Workflow cancellation requested")
+                deadline = self.db.execute(
+                    "SELECT deadline_at FROM workflow_deadlines WHERE workflow_id=?", (workflow[0],)).fetchone()
+                if deadline and time.time() >= deadline[0]:
+                    raise TaskDeadlineExceeded("Workflow total wall-time budget exhausted")
                 self.db.execute("INSERT OR IGNORE INTO workflow_budget_tasks VALUES (?,?)",
                                 (task_id, workflow[0]))
                 owner = self.db.execute(
@@ -204,6 +210,10 @@ class Runtime:
                                 (task_id, time.time() + policy["total_seconds"]))
                 self.event(task_id, "submitted", {"recipe": list(recipe)})
             if workflow is not None:
+                if deadline is not None:
+                    self.db.execute(
+                        "UPDATE task_controls SET deadline_at=CASE WHEN deadline_at IS NULL THEN ? "
+                        "ELSE min(deadline_at,?) END WHERE task_id=?", (deadline[0], deadline[0], task_id))
                 self.db.execute(
                     "UPDATE workflow_nodes SET task_id=?,state='running',error=NULL "
                     "WHERE workflow_id=? AND node_id=?", (task_id, *workflow))
