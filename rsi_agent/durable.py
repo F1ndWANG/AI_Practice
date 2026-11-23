@@ -105,7 +105,7 @@ class Runtime:
         self.db.execute("UPDATE tasks SET state=? WHERE id=?", (state, key))
         self.event(key, "state", {"from": current, "to": state})
 
-    def submit(self, key, source, recipe, rules, *, limits=None, memory_subject=None, usage=None):
+    def submit(self, key, source, recipe, rules, *, limits=None, memory_subject=None, usage=None, workflow=None):
         if not isinstance(key, str) or not key:
             raise ValueError("A nonempty idempotency key is required")
         if usage is not None:
@@ -163,6 +163,15 @@ class Runtime:
         task_id = hashlib.sha256(key.encode()).hexdigest()
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
+            if workflow is not None:
+                binding = self.db.execute(
+                    "SELECT n.task_id,c.cancel_requested FROM workflow_nodes n "
+                    "JOIN workflow_controls c ON c.workflow_id=n.workflow_id "
+                    "WHERE n.workflow_id=? AND n.node_id=?", workflow).fetchone()
+                if binding is None or binding["task_id"] not in (None, task_id):
+                    raise ValueError("Unknown or conflicting workflow node binding")
+                if binding["cancel_requested"]:
+                    raise TaskCancelled("Workflow cancellation requested")
             configured = self.db.execute(
                 "SELECT value FROM runtime_settings WHERE name='concurrency'").fetchone()
             if configured and json.loads(configured["value"]) != policy["concurrency"]:
@@ -183,6 +192,10 @@ class Runtime:
                 self.db.execute("INSERT INTO task_controls(task_id,deadline_at) VALUES (?,?)",
                                 (task_id, time.time() + policy["total_seconds"]))
                 self.event(task_id, "submitted", {"recipe": list(recipe)})
+            if workflow is not None:
+                self.db.execute(
+                    "UPDATE workflow_nodes SET task_id=?,state='running',error=NULL "
+                    "WHERE workflow_id=? AND node_id=?", (task_id, *workflow))
             if usage is not None:
                 ledger = (usage.get("tokens"), usage.get("cost"), canonical(usage["evidence"]))
                 old_usage = self.db.execute(
@@ -251,19 +264,26 @@ class Runtime:
             raise ValueError("Unknown task")
         return public(row)
 
+    def cancel_locked(self, key, *, context=None):
+        """Apply cancellation inside a caller-owned write transaction."""
+        row = self.db.execute("SELECT state FROM tasks WHERE id=?", (key,)).fetchone()
+        if row is None:
+            raise ValueError("Unknown task")
+        if row["state"] in {"succeeded", "rejected", "cancelled", "timed_out"}:
+            return
+        self.db.execute("INSERT OR IGNORE INTO task_controls(task_id) VALUES (?)", (key,))
+        requested = self.db.execute(
+            "SELECT cancel_requested FROM task_controls WHERE task_id=?", (key,)).fetchone()[0]
+        self.db.execute("UPDATE task_controls SET cancel_requested=1 WHERE task_id=?", (key,))
+        if not requested:
+            self.event(key, "cancel_requested", context or {})
+        if row["state"] in {"pending", "failed", "interrupted"}:
+            self.transition(key, "cancelled")
+
     def cancel(self, key):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            row = self.db.execute("SELECT state FROM tasks WHERE id=?", (key,)).fetchone()
-            if row is None:
-                raise ValueError("Unknown task")
-            if row["state"] in {"succeeded", "rejected", "cancelled", "timed_out"}:
-                return self.status(key)
-            self.db.execute("INSERT OR IGNORE INTO task_controls(task_id) VALUES (?)", (key,))
-            self.db.execute("UPDATE task_controls SET cancel_requested=1 WHERE task_id=?", (key,))
-            self.event(key, "cancel_requested", {})
-            if row["state"] in {"pending", "failed", "interrupted"}:
-                self.transition(key, "cancelled")
+            self.cancel_locked(key)
         return self.status(key)
 
     def guard(self, key):
