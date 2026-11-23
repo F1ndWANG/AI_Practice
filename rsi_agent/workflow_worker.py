@@ -19,9 +19,6 @@ class WorkflowWorker:
     def __init__(self, workflows):
         self.workflows = workflows
         self.db = workflows.runtime.db
-        self.db.execute("CREATE TABLE IF NOT EXISTS workflow_dispatch "
-                        "(workflow_id TEXT PRIMARY KEY,last_visit INTEGER NOT NULL)")
-        self.db.commit()
 
     def tick(self, *, max_workflows=10, node_workers=2, max_attempts=3, stop_event=None):
         for value in (max_workflows, node_workers, max_attempts):

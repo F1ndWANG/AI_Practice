@@ -30,6 +30,8 @@ class Workflows:
             CREATE TABLE IF NOT EXISTS workflow_nodes (
                 workflow_id TEXT, node_id TEXT, task_id TEXT, state TEXT,
                 error TEXT, PRIMARY KEY(workflow_id,node_id));
+            CREATE TABLE IF NOT EXISTS workflow_dispatch (
+                workflow_id TEXT PRIMARY KEY,last_visit INTEGER NOT NULL);
         """)
         runtime.db.execute(
             "INSERT OR IGNORE INTO workflow_controls(workflow_id) SELECT id FROM workflows")
@@ -95,6 +97,9 @@ class Workflows:
             if not old:
                 self.runtime.db.execute("INSERT INTO workflows VALUES (?,?,'pending')", (workflow_id, encoded))
                 self.runtime.db.execute("INSERT INTO workflow_controls(workflow_id) VALUES (?)", (workflow_id,))
+                self.runtime.db.execute(
+                    "INSERT INTO workflow_dispatch SELECT ?,coalesce(max(last_visit),0)+1 FROM workflow_dispatch",
+                    (workflow_id,))
                 if "total_seconds" in limits:
                     self.runtime.db.execute("INSERT INTO workflow_deadlines VALUES (?,?)",
                                             (workflow_id, time.time() + limits["total_seconds"]))

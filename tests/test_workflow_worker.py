@@ -27,6 +27,21 @@ def graph():
 
 
 class WorkflowWorkerTests(unittest.TestCase):
+    def test_new_arrivals_join_the_tail_instead_of_starving_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Runtime(directory)
+            workflows = Workflows(runtime)
+            older = workflows.submit("older", graph())
+            worker = WorkflowWorker(workflows)
+            with runtime.task_lock("workflow-" + older):
+                self.assertEqual(worker.tick(max_workflows=1)["busy"], [older])
+            newer = workflows.submit("newer", graph())
+            result = worker.tick(max_workflows=1)
+            self.assertEqual(result["workflows"][0]["id"], older)
+            self.assertEqual(workflows.status(newer)["state"], "pending")
+            self.assertEqual(worker.tick(max_workflows=1)["workflows"][0]["id"], newer)
+            runtime.close()
+
     def test_polling_acknowledges_expired_graph_without_launching_tools(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Runtime(directory)
