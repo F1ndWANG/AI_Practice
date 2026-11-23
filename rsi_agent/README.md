@@ -298,6 +298,21 @@ python -m rsi_agent.workflows runs/graph status WORKFLOW_ID
 
 本实现使用 FIRST_COMPLETED 完成通知推进图，分支完成后立即释放满足依赖的下游节点，运行命令处理完当前可执行节点后返回 succeeded、failed 或 incomplete。正在被其他执行进程持有的节点、主动中断的节点会使图保持 incomplete，可使用同一工作流 ID 再次运行。它面向共享本地文件系统上的多进程执行。
 
+### 持续运行的工作流 Worker
+
+```bash
+# 处理一次有界队列快照，适合手动执行或由外部作业系统调用
+python -m rsi_agent.workflow_worker runs/graph --once --max-workflows 10
+# 持续发现新提交及中断的工作流；每张图最多并发执行两个节点
+python -m rsi_agent.workflow_worker runs/graph --poll-interval 0.5 --node-workers 2 --max-attempts 3
+```
+
+Worker 轮询 pending、running、incomplete、cancelling、timing_out，自动推进恢复与截止时间确认。队列使用持久化递增序号轮转，重启和系统时间回拨不重置顺序；被其他进程占用的队首不会永久挡住后续工作。每轮最多检查 max-workflows 张图，每个 Worker 逐图执行，可用多个进程增加图间并发，现有文件锁和根目录工具并发限制继续生效。同一控制进程错误会记入 JSON errors 并继续处理该批次其余图；日志同时提供处理结果和 busy 列表。
+
+收到 SIGTERM 或 SIGINT 时，Worker 停止接收下一张图、停止当前图的新节点调度，并等待已调度节点执行结束；部分完成的图保留 incomplete 和可靠检查点，下次启动自动继续，不会因此设置业务取消标记。退出等待时间取决于在途节点的时限，强制杀进程后的恢复仍依赖既有工具幂等与外部回执协议。--once 遇到控制器错误、失败或超时结果返回非零；busy 和 incomplete 本身不代表 Worker 故障。持续模式输出每轮结果并继续轮询。
+
+成功、失败、取消和超时的终态图不自动重跑，失败图可在排查后使用 workflows run 显式重试；节点累计尝试次数和共享预算仍不重置。Worker 持续运行时会轮询确认离线图的超时；没有 Worker 时仍需手动 run 推进状态。部署时可由 systemd 或容器进程管理器监管该命令。本实现使用本地 SQLite 与文件锁，适用范围仍是共享本地文件系统，不提供跨主机队列或故障转移租约。
+
 ### OpenTelemetry 与事务事件导出
 
 无需额外依赖即可从已提交事件导出带 W3C Trace Context 的 JSON：

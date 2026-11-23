@@ -30,6 +30,8 @@ class Workflows:
             CREATE TABLE IF NOT EXISTS workflow_nodes (
                 workflow_id TEXT, node_id TEXT, task_id TEXT, state TEXT,
                 error TEXT, PRIMARY KEY(workflow_id,node_id));
+            CREATE TABLE IF NOT EXISTS workflow_dispatch (
+                workflow_id TEXT PRIMARY KEY,last_visit INTEGER NOT NULL);
         """)
         runtime.db.execute(
             "INSERT OR IGNORE INTO workflow_controls(workflow_id) SELECT id FROM workflows")
@@ -95,6 +97,9 @@ class Workflows:
             if not old:
                 self.runtime.db.execute("INSERT INTO workflows VALUES (?,?,'pending')", (workflow_id, encoded))
                 self.runtime.db.execute("INSERT INTO workflow_controls(workflow_id) VALUES (?)", (workflow_id,))
+                self.runtime.db.execute(
+                    "INSERT INTO workflow_dispatch SELECT ?,coalesce(max(last_visit),0)+1 FROM workflow_dispatch",
+                    (workflow_id,))
                 if "total_seconds" in limits:
                     self.runtime.db.execute("INSERT INTO workflow_deadlines VALUES (?,?)",
                                             (workflow_id, time.time() + limits["total_seconds"]))
@@ -219,13 +224,15 @@ class Workflows:
                 runtime.close()
         return state, error
 
-    def run(self, workflow_id, *, workers=2, max_attempts=3):
+    def run(self, workflow_id, *, workers=2, max_attempts=3, stop_event=None):
         if type(workers) is not int or workers < 1 or type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("Workers and attempt limits must be positive integers")
         if len(workflow_id) != 64 or any(character not in "0123456789abcdef" for character in workflow_id):
             raise ValueError("Invalid workflow ID")
         with self.runtime.task_lock("workflow-" + workflow_id):
             status = self.status(workflow_id)
+            if stop_event is not None and stop_event.is_set():
+                return status
             if self.expired(workflow_id) and not status["cancel_requested"]:
                 # A crashed orchestrator can leave bound tasks without an active worker.
                 # Their inherited deadlines also apply when resumed by a queue worker.
@@ -271,13 +278,18 @@ class Workflows:
                     while True:
                         cancelled = self.cancellation_requested(workflow_id)
                         expired = self.expired(workflow_id)
-                        if not cancelled and not expired:
+                        stopping = stop_event is not None and stop_event.is_set()
+                        if not cancelled and not expired and not stopping:
                             ready = [key for key in nodes if key not in visited and all(
                                 completed[dependency]["state"] == "succeeded" for dependency in dependencies[key])]
                             for key in ready[:max(0, workers - len(active))]:
+                                if stop_event is not None and stop_event.is_set():
+                                    break
                                 visited.add(key)
                                 try:
                                     source = self.source(nodes[key], completed)
+                                    if stop_event is not None and stop_event.is_set():
+                                        break
                                     job = pool.submit(self.execute_node, workflow_id, nodes[key], source, max_attempts)
                                     active[job] = key
                                 except (OSError, ValueError) as error:
@@ -290,7 +302,8 @@ class Workflows:
                             remaining = any(key not in visited and all(
                                 completed[parent]["state"] == "succeeded" for parent in dependencies[key])
                                 for key in nodes)
-                            if not cancelled and not expired and remaining:
+                            if (not cancelled and not expired and remaining
+                                    and not (stop_event is not None and stop_event.is_set())):
                                 continue
                             break
                         finished, _ = wait(active, timeout=0.1, return_when=FIRST_COMPLETED)
