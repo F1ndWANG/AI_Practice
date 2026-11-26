@@ -350,6 +350,19 @@ python -m rsi_agent.runtime_traces runs/graph \
 
 JSON 导出保留固定快照，同一文件路径已含不同内容时会失败，新增任务后可选择新的输出文件。链路属性提供任务 ID、步骤、调用数与结果。它与现有事件日志共同用于故障定位。
 
+### 运行健康快照
+
+```bash
+python -m rsi_agent.runtime_health runs/graph
+python -m rsi_agent.runtime_health runs/graph --check
+```
+
+报告通过只读 SQLite 连接、在同一个事务快照内汇总任务状态、工具调用与活跃执行时间、恢复次数、工作流状态、共享预算、队列积压和用量覆盖率。查询不会初始化 Runtime、创建业务表、绑定 Worker 策略或推进任务状态；缺失的历史可选表通过 capabilities 和 available 标记。报告不包含任务源文本、规则或异常原文。
+
+队列的 eligible、backoff、quarantined 三项互斥，合计为 total；eligible 仅表示可进入轮询，不代表进程锁可用。expired 是独立维度，可能与退避或隔离重叠。预算统计包括已完成工作流的累计额度，unfinished_at_limit 单独指出未完成图到达上限的数量；最后一个在途工具也可能刚好用满额度，因此该数值本身不触发告警。Token 和成本只统计已有账本中的已知值，同时报告覆盖率；缺失记录或未知值不会作为零计入，空集合的覆盖率为 null。
+
+--check 在存在隔离图或已过期未完成图时返回 1，报告正常生成返回 0，数据库不存在或不可读取返回 2。历史任务失败以状态计数呈现，不直接视为当前告警。该检查只观察持久化运行状态；没有 Worker 心跳证据时，worker_liveness 明确为 unknown，不能代替进程存活、依赖服务连通性或独立业务成功率评测。活跃执行时间不包含停机等待，端到端延迟和验证器误判率仍使用带独立标签的 runtime_metrics/runtime_export 评测链路。
+
 ### 一致性修复
 
 任务、控制记录、提交事件及规划用量现在在同一个 SQLite 写事务中提交。相同幂等键并发提交被串行化；已有用量记录绑定不同内容时会失败。历史规划任务缺少用量时保留未知，避免当作零 Token。
